@@ -114,11 +114,13 @@ def read_in(data_folder, admin, max_lag, start_year=2015, start_month=1, end_yea
     admin_year_urbanisation = pd.read_csv(os.path.join(data_folder, f'admin_year_urbanisation/admin{admin}_year_urbanisation.csv'))
     admin_year_surveillance = pd.read_csv(os.path.join(data_folder, f'admin_year_surveillance/admin{admin}_year_surveillance.csv'))
     admin_year_urban_surveillance = pd.read_csv(os.path.join(data_folder, f'admin_year_urban_surveillance/admin{admin}_year_urban_surveillance.csv'))
+    admin_year_density = pd.read_csv(os.path.join(data_folder, f'admin_year_density/admin{admin}_year_density.csv'))
     admin_year_pop = pd.read_csv(os.path.join(data_folder, f'admin_year_pop/admin{admin}_year_pop.csv'))
 
-    admin_year = pd.merge(pd.merge(pd.merge(admin_year_urbanisation, admin_year_surveillance, on=[f'admin{admin}', 'year']),
+    admin_year = pd.merge(pd.merge(pd.merge(pd.merge(admin_year_urbanisation, admin_year_surveillance, on=[f'admin{admin}', 'year']),
                                    admin_year_urban_surveillance, on=[f'admin{admin}', 'year']),
-                                   admin_year_pop, on=[f'admin{admin}', 'year'])
+                                   admin_year_pop, on=[f'admin{admin}', 'year']),
+                                   admin_year_density, on=[f'admin{admin}', 'year'])
     new_cols = admin_year.columns.tolist()
     new_cols.remove('population')
     new_cols.insert(2, 'population')
