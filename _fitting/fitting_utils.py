@@ -403,3 +403,30 @@ def plot_posteriors_side_by_side(idata1, idata2, var_names=None, figsize=(12, 3)
 
     plt.show()
 
+def plot_spline(idata, var, sigma_var, B, data, figsize=(10,5)):
+    # Extract posterior samples
+    w_samples = idata.posterior[var].stack(draws=("chain", "draw")).values  # (n_basis, n_draws)
+    sigma_w_samples = idata.posterior[sigma_var].stack(draws=("chain", "draw")).values  # (n_draws,)
+
+    # Compute spline contributions for each draw
+    f_s1_samples = (np.asarray(B1, order="F") @ w_samples) * sigma_w_samples  # broadcasting: (n_obs, n_draws)
+    f_s1_samples = f_s1_samples - np.mean(f_s1_samples)
+
+    # Compute mean and 95% credible intervals
+    f_s1_mean = f_s1_samples.mean(axis=1)
+    f_s1_lower5 = np.percentile(f_s1_samples, 25, axis=1)
+    f_s1_upper5 = np.percentile(f_s1_samples, 75, axis=1)
+    f_s1_lower = np.percentile(f_s1_samples, 2.5, axis=1)
+    f_s1_upper = np.percentile(f_s1_samples, 97.5, axis=1)
+
+    # Plot
+    index = np.argsort(data)
+    plt.figure(figsize=figsize)
+    plt.plot(np.array(data)[index], f_s1_mean[index], color='red', label='Mean spline effect')
+    plt.fill_between(np.array(data)[index], f_s1_lower[index], f_s1_lower5[index], color='red', alpha=0.3, label='95% CI')
+    plt.fill_between(np.array(data)[index], f_s1_lower5[index], f_s1_upper5[index], color='blue', alpha=0.3, label='50% CI')
+    plt.fill_between(np.array(data)[index], f_s1_upper5[index], f_s1_upper[index], color='red', alpha=0.3, label='95% CI')
+    plt.xlabel('Values')
+    plt.ylabel('Spline contribution')
+    plt.legend()
+    plt.show()
