@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import arviz as az
+from patsy import dmatrix
 
 
 def hist_plot(idata, figsize=(9,5), root=True):
@@ -403,14 +404,15 @@ def plot_posteriors_side_by_side(idata1, idata2, var_names=None, figsize=(12, 3)
 
     plt.show()
 
-def plot_spline(idata, var, sigma_var, B, data, figsize=(10,5)):
+def plot_spline(idata, var, sigma_var, B, data, knots=None, figsize=(10,5), show_basis=False, basis_scale=4, orthogonal=True, invert_log=False):
     # Extract posterior samples
     w_samples = idata.posterior[var].stack(draws=("chain", "draw")).values  # (n_basis, n_draws)
     sigma_w_samples = idata.posterior[sigma_var].stack(draws=("chain", "draw")).values  # (n_draws,)
 
     # Compute spline contributions for each draw
-    f_s1_samples = (np.asarray(B1, order="F") @ w_samples) * sigma_w_samples  # broadcasting: (n_obs, n_draws)
-    f_s1_samples = f_s1_samples - np.mean(f_s1_samples)
+    f_s1_samples = (np.asarray(B, order="F") @ w_samples) * sigma_w_samples  # broadcasting: (n_obs, n_draws)
+    print('function mean across samples: ', np.mean(f_s1_samples))
+    #f_s1_samples = f_s1_samples - np.mean(f_s1_samples)
 
     # Compute mean and 95% credible intervals
     f_s1_mean = f_s1_samples.mean(axis=1)
@@ -422,10 +424,37 @@ def plot_spline(idata, var, sigma_var, B, data, figsize=(10,5)):
     # Plot
     index = np.argsort(data)
     plt.figure(figsize=figsize)
-    plt.plot(np.array(data)[index], f_s1_mean[index], color='red', label='Mean spline effect')
-    plt.fill_between(np.array(data)[index], f_s1_lower[index], f_s1_lower5[index], color='red', alpha=0.3, label='95% CI')
-    plt.fill_between(np.array(data)[index], f_s1_lower5[index], f_s1_upper5[index], color='blue', alpha=0.3, label='50% CI')
-    plt.fill_between(np.array(data)[index], f_s1_upper5[index], f_s1_upper[index], color='red', alpha=0.3, label='95% CI')
+    if knots is not None:
+        if invert_log:
+                plot_knots = np.exp(knots)-1e-6
+        else:
+             plot_knots = knots
+        plt.vlines(plot_knots, ymin=np.min(f_s1_lower), ymax=np.max(f_s1_upper), label='knots')
+        if show_basis:
+            x = np.linspace(np.min(data), np.max(data), 1000)
+            if invert_log:
+                xx = np.exp(x)-1e-6
+            else:
+                 xx = x
+            BB = dmatrix("bs(x, knots=knots, degree=3, include_intercept=False)-1", {"x": x, "knots": knots},)
+            if orthogonal:
+                BB = np.asarray(BB)
+                BB = (BB - BB.mean(axis=0)) / BB.std(axis=0)
+                BB, _ = np.linalg.qr(BB)
+            print(np.min(BB))
+            for i in range(BB.shape[1]):
+                plt.plot(xx,
+                         (BB[:, i] - np.min(BB))*basis_scale + np.max(f_s1_upper) + (np.max(f_s1_upper)-np.min(f_s1_lower))*0.05,
+                         alpha=0.99, linestyle=':')
+            # plt.plot(x, (np.max(f_s1_upper)+(np.max(f_s1_upper)-np.min(f_s1_lower))*0.01)*np.ones(len(x)), c='white', alpha=0.8)
+
+    x = np.array(data)[index]
+    if invert_log:
+        x = np.exp(x)-1e-6
+    plt.plot(x, f_s1_mean[index], color='red', label='Mean spline effect')
+    plt.fill_between(x, f_s1_lower[index], f_s1_lower5[index], color='red', alpha=0.3, label='95% CI')
+    plt.fill_between(x, f_s1_lower5[index], f_s1_upper5[index], color='blue', alpha=0.3, label='50% CI')
+    plt.fill_between(x, f_s1_upper5[index], f_s1_upper[index], color='red', alpha=0.3)
     plt.xlabel('Values')
     plt.ylabel('Spline contribution')
     plt.legend()

@@ -103,7 +103,7 @@ def best_res_align(r1, r1catcon, r2, r2catcon,
         # r2 is coarser -> align r2 to r1
         return align_r1_to_r2(r2, r1, data_type=r2catcon)[::-1]
 
-def read_in(data_folder, admin, max_lag, start_year=2015, start_month=1, end_year=2024, end_month=12, normalise=True, celsius=True):
+def read_in(data_folder, admin, max_lag, start_year=2015, start_month=1, end_year=2024, end_month=12, normalise=True, celsius=True, tp_log=True, dropna=True):
     valid_admin2 = pd.read_csv(os.path.join(data_folder, 'valid_admin/valid_admin2.csv'), header=None)[0].tolist()
     valid_admin1 = pd.read_csv(os.path.join(data_folder, 'valid_admin/valid_admin1.csv'), header=None)[0].tolist()
     valid_admin2.sort()
@@ -112,11 +112,6 @@ def read_in(data_folder, admin, max_lag, start_year=2015, start_month=1, end_yea
 
     # admin_year (urb, surv, urb_surv)
     admin_year_urbanisation = pd.read_csv(os.path.join(data_folder, f'admin_year_urbanisation/admin{admin}_year_urbanisation.csv'))
-    cols = ["urbanisation_nonweighted", "urbanisation_pop_weighted"]
-    for c in cols:
-        admin_year_urbanisation[c + "_std"] = (
-            admin_year_urbanisation[c] - admin_year_urbanisation[c].mean()
-        ) / (admin_year_urbanisation[c].std()+1e-6)
 
     admin_year_surveillance = pd.read_csv(os.path.join(data_folder, f'admin_year_surveillance/admin{admin}_year_surveillance.csv'))
     admin_year_urban_surveillance = pd.read_csv(os.path.join(data_folder, f'admin_year_urban_surveillance/admin{admin}_year_urban_surveillance.csv'))
@@ -135,7 +130,7 @@ def read_in(data_folder, admin, max_lag, start_year=2015, start_month=1, end_yea
     # admin_year_month (cases + ONI) + weather_stats(lag))
 
     # admin_year_month
-    admin2_year_month_cases = d_incidence = pyreadr.read_r(os.path.join(data_folder, 'cases_deaths_pop_2016_2024_38.rds'))[None]
+    admin2_year_month_cases  = pyreadr.read_r(os.path.join(data_folder, 'cases_deaths_pop_2016_2024_38.rds'))[None]
     admin2_year_month_cases = admin2_year_month_cases.loc[:, ['admin1', 'admin2', 'year', 'month', 'cases']]
     admin2_year_month_cases = admin2_year_month_cases.astype({'year': 'int32', 'month': 'int32'})
     admin_year_month_cases = (admin2_year_month_cases[admin2_year_month_cases[f"admin{admin}"].isin(va[admin])].sort_values([f"admin{admin}", 'year', 'month']).reset_index(drop=True))
@@ -151,9 +146,6 @@ def read_in(data_folder, admin, max_lag, start_year=2015, start_month=1, end_yea
     # ONI
     ONI = pd.read_csv(os.path.join(data_folder, 'ONI/ONI.csv'))
     ONI = ONI.loc[(ONI['year'] >= 2016) & (ONI['year'] <= 2024), ['year', 'month', 'ONI']].reset_index(drop=True)
-    ONI['ONI' + "_std"] = (
-            ONI['ONI'] - ONI['ONI'].mean()
-        ) / (ONI['ONI'].std()+1e-6)
 
     admin_year_month = admin_year_month_cases.merge(ONI, on=['year', 'month'], how='left')
 
@@ -165,6 +157,15 @@ def read_in(data_folder, admin, max_lag, start_year=2015, start_month=1, end_yea
     
     admin_year_month_climate_statistics = admin_year_month_climate_statistics.merge(admin_year_month_tp_statistics, on=[f'admin{admin}', 'year', 'month'], how='left')
     admin_year_month_climate_statistics = admin_year_month_climate_statistics.drop(columns=['tp_mean_unweighted', 'tp_mean_pop_weighted'], inplace=False)
+    if celsius:
+        t2m_cols = [col for col in admin_year_month_climate_statistics.columns if col.startswith("t2m")]
+        admin_year_month_climate_statistics[t2m_cols] = admin_year_month_climate_statistics[t2m_cols] - 273.15
+    if tp_log:
+        tp_cols = [col for col in admin_year_month_climate_statistics.columns if col.startswith("tp")]
+        for c in tp_cols:
+            admin_year_month_climate_statistics[c + '_log1p'] = np.log1p(admin_year_month_climate_statistics[c])
+            admin_year_month_climate_statistics[c + '_log'] = np.log(admin_year_month_climate_statistics[c]+1e-6)
+    
     for lag in range(0, max_lag + 1):
         admin_year_month_climate_statistics_lag = admin_year_month_climate_statistics.copy()
         new_cols = admin_year_month_climate_statistics_lag.columns[0:3].to_list() + [c+f' ({lag})' for c in admin_year_month_climate_statistics_lag.columns[3:]]
@@ -185,4 +186,15 @@ def read_in(data_folder, admin, max_lag, start_year=2015, start_month=1, end_yea
     mask2 = full['date'] <= pd.Timestamp(year=end_year, month=end_month, day=1)
     full = full[mask1*mask2]
     full = full.drop(columns=['date'], inplace=False)
+
+    if dropna:
+        full = full.dropna()
+
+    if normalise:
+        cols = ["urbanisation_nonweighted", "urbanisation_pop_weighted", "ONI"]
+        for c in cols:
+            x = full[c].astype(float)
+            mu = np.mean(x)
+            sd = np.std(x)
+            full[c + "_std"] = (x - mu) / sd
     return full
