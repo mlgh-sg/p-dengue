@@ -404,14 +404,14 @@ def plot_posteriors_side_by_side(idata1, idata2, var_names=None, figsize=(12, 3)
 
     plt.show()
 
-def plot_spline(idata, var, sigma_var, B, data, knots=None, figsize=(10,5), show_basis=False, basis_scale=4, orthogonal=True, invert_log=False):
+def plot_spline(idata, stat_name, var, sigma_var, B, data, knots=None, figsize=(10,5), show_basis=False, basis_scale=4, orthogonal=True, invert_log=False):
     # Extract posterior samples
     w_samples = idata.posterior[var].stack(draws=("chain", "draw")).values  # (n_basis, n_draws)
     sigma_w_samples = idata.posterior[sigma_var].stack(draws=("chain", "draw")).values  # (n_draws,)
 
     # Compute spline contributions for each draw
     f_s1_samples = (np.asarray(B, order="F") @ w_samples) * sigma_w_samples  # broadcasting: (n_obs, n_draws)
-    print('function mean across samples: ', np.mean(f_s1_samples))
+    # print('function mean across samples: ', np.mean(f_s1_samples))
     #f_s1_samples = f_s1_samples - np.mean(f_s1_samples)
 
     # Compute mean and 95% credible intervals
@@ -441,7 +441,6 @@ def plot_spline(idata, var, sigma_var, B, data, knots=None, figsize=(10,5), show
                 BB = np.asarray(BB)
                 BB = (BB - BB.mean(axis=0)) / BB.std(axis=0)
                 BB, _ = np.linalg.qr(BB)
-            print(np.min(BB))
             for i in range(BB.shape[1]):
                 plt.plot(xx,
                          (BB[:, i] - np.min(BB))*basis_scale + np.max(f_s1_upper) + (np.max(f_s1_upper)-np.min(f_s1_lower))*0.05,
@@ -455,7 +454,9 @@ def plot_spline(idata, var, sigma_var, B, data, knots=None, figsize=(10,5), show
     plt.fill_between(x, f_s1_lower[index], f_s1_lower5[index], color='red', alpha=0.3, label='95% CI')
     plt.fill_between(x, f_s1_lower5[index], f_s1_upper5[index], color='blue', alpha=0.3, label='50% CI')
     plt.fill_between(x, f_s1_upper5[index], f_s1_upper[index], color='red', alpha=0.3)
-    plt.xlabel('Values')
+    plt.xlabel(f'Values ({stat_name})')
     plt.ylabel('Spline contribution')
     plt.legend()
-    plt.show()
+
+    fig = plt.gcf()
+    return fig

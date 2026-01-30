@@ -2,7 +2,16 @@ import pymc as pm
 import numpy as np
 from patsy import dmatrix
 import re
+import os
+import matplotlib.pyplot as plt
+import arviz as az
+import xarray as xr
+import time
+import pandas as pd
+import warnings
+from _fitting.fitting_utils import hist_plot, CI_plot, CI_plot_alt, CI_plot_both, plot_posteriors_side_by_side, plot_spline
 
+###
 def abbrev_surveillance(name):
     if name is None:
         return "nosurv"
@@ -63,6 +72,245 @@ def model_settings_to_name(settings):
     else:
         return f"[{surv} {urb}] [{stat_str}] [{deg},{k},{kt},{orth}]"
 
+def settings_to_var_names(model_settings):
+    v = ['intercept', 'alpha']
+    if model_settings['urbanisation_name'] is not None:
+        v = v + ['beta_u']
+    v = v + [f'sigma_w({stat_name})' for stat_name in model_settings['stat_names']]
+    v = v + [f'w({stat_name})' for stat_name in model_settings['stat_names']]
+    return v
+
+def elpd_to_xr(elpd):
+    return xr.Dataset(
+        {k: xr.DataArray(v) for k, v in elpd.items()}
+    )
+
+def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
+    return {
+        "model_name": model_name,
+        "data_name": data_name,
+
+        # WAIC
+        "waic": float(eval_waic.elpd_waic),
+        #"p_waic": float(eval_waic.p_waic),
+        "waic_se": float(eval_waic.se),
+        "waic_warning": float(eval_waic.warning),
+
+        # LOO
+        "loo": float(eval_loo.elpd_loo),
+        #"p_loo": float(eval_loo.p_loo),
+        "loo_se": float(eval_loo.se),
+
+        # diagnostics
+        "n_pareto_k_bad": int(np.sum(eval_loo.pareto_k>0.7)),
+        "n_pareto_k_very_bad": int(np.sum(eval_loo.pareto_k>1)),
+        "pareto_k_mean": float(eval_loo.pareto_k.mean()),
+    }
+###
+def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500, n_tune=500, sampler="nutpie"):
+    model_name = model_settings_to_name(model_settings)
+    folder_name = f'{data_name}/{model_name}'
+    data_path = os.path.join(outpath, f'{data_name}/')
+    os.makedirs(data_path, exist_ok=True)
+    output_path = os.path.join(outpath, folder_name)
+    os.makedirs(output_path, exist_ok=True)
+
+    model, model_B, model_knot_list = build_model(data.copy(), **model_settings)
+    with model:
+        s0 = time.time()
+        idata = pm.sample(tune=n_tune,
+                          draws=n_draws,
+                          chains=n_chains,
+                          random_seed=42,
+                          discard_tuned_samples=True,
+                          nuts_sampler=sampler,
+                          store_divergences=True,
+                          progressbar=False)
+        s1 = time.time()
+        pm.compute_log_likelihood(idata, progressbar=False)
+        s2 = time.time()
+        print(f'\nPosterior Sampling {s1 - s0:.2f} seconds')
+        print(f'Log Likelihood Compute {s2 - s1:.2f} seconds \n')
+
+    #### Time Metrics
+    metrics_df = pd.DataFrame([{
+        "model_name": model_name,
+        "data_name": data_name,
+        "sampling_time_sec": s1 - s0,
+        "log_likelihood_time_sec": s2 - s1,
+        "n_chains": n_chains,
+        "n_draws": n_draws,
+        "n_tune": n_tune,
+        "sampler": sampler,
+    }])
+    # inner
+    inner_metrics_file = os.path.join(output_path, "model_timings.csv")
+    if os.path.exists(inner_metrics_file):
+        metrics_df.to_csv(inner_metrics_file, mode="a", header=False, index=False)
+    else:
+        metrics_df.to_csv(inner_metrics_file, index=False)
+    # outer
+    outer_metrics_file = os.path.join(data_path, "model_timings.csv")
+    if os.path.exists(outer_metrics_file):
+        metrics_df.to_csv(outer_metrics_file, mode="a", header=False, index=False)
+    else:
+        metrics_df.to_csv(outer_metrics_file, index=False)
+    ####
+
+    #### WAIC and PSIS LOO
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        eval_waic = az.waic(idata)
+        eval_psis_loo_elpd = az.loo(idata)
+    # dataframes (inner and outer)
+    wl_df = pd.DataFrame([elpd_to_row(eval_waic, eval_psis_loo_elpd, model_name, data_name)])
+    inner_wl_file = os.path.join(output_path, "model_elpd_metrics.csv")
+    outer_wl_file = os.path.join(data_path, "model_elpd_metrics.csv")
+    wl_df.to_csv(inner_wl_file, index=False)
+    if os.path.exists(outer_wl_file):
+        wl_df.to_csv(outer_wl_file, mode="a", header=False, index=False)
+    else:
+        wl_df.to_csv(outer_wl_file, index=False)
+
+    khat_fig = az.plot_khat(eval_psis_loo_elpd).get_figure()
+    fig_file = os.path.join(output_path, f"khat.png")
+    khat_fig.savefig(fig_file, bbox_inches="tight")
+    plt.close(khat_fig)
+    ####
+
+    # Save inference data
+    idata_file = os.path.join(output_path, "idata.nc")
+    idata.to_netcdf(idata_file)
+
+    # Save summary table
+    var_names = settings_to_var_names(model_settings)
+    summary_df = az.summary(idata, var_names=var_names)
+    summary_file = os.path.join(output_path, "summary.csv")
+    summary_df.to_csv(summary_file)
+
+    # Plot and save traces
+    trace_axes = az.plot_trace(idata, var_names=var_names)
+    # trace_axes is an ndarray of matplotlib Axes
+    figs = {ax.get_figure() for ax in trace_axes.ravel()}  # unique figures
+    for i, fig in enumerate(figs):
+        fig_file = os.path.join(output_path, f"trace.png")
+        fig.savefig(fig_file, bbox_inches="tight")
+        plt.close(fig)
+
+    # Plot and save splines
+    for stat_name in model_settings['stat_names']:
+        fig = plot_spline(
+            idata,
+            stat_name,
+            f'w({stat_name})',
+            f'sigma_w({stat_name})',
+            model_B[stat_name],
+            data[stat_name],
+            knots=model_knot_list[stat_name],
+            show_basis=True,
+            basis_scale=8,
+            invert_log=False
+        );
+        if isinstance(fig, plt.Figure):
+            fig_file = os.path.join(output_path, f"spline_{stat_name}.png")
+            fig.savefig(fig_file, bbox_inches="tight")
+            plt.close(fig)
+
+    create_html_report(output_path)
+    return
+
+def create_html_report(folder_path, out_file=None, title=None):
+    """
+    Generate a simple HTML report by combining CSV tables and images
+    in a folder. Assumes files are named:
+    - model_timings.csv
+    - summary.csv
+    - model_elpd_metrics.csv
+    - trace.png
+    - khat.png
+    - spline_*.png
+    """
+
+    if out_file is None:
+        out_file = os.path.join(folder_path, "_report.html")
+    if title is None:
+        title = f"Model Report: {os.path.basename(folder_path)}"
+
+    html_parts = [
+        f"<html><head><title>{title}</title>",
+        "<style>",
+        "body { font-family: Arial, sans-serif; font-size: 12px; line-height: 1.2; margin: 8px; text-align:center; }",
+        "h1, h2, h3, h4 { margin: 4px 0 8px 0; font-weight: normal; }",
+        "table { border-collapse: collapse; font-size: 15px; margin: 0 auto 12px auto; width: 80%; }",
+        "table th, table td { border: 1px solid #aaa; padding: 4px 6px; line-height: 1.2; text-align: center; }",
+        "img { max-width: 80%; margin: 8px auto; display: block; }",
+        "p { margin: 4px 0; }",
+        "</style></head><body>"
+    ]
+    html_parts.append(f"<h1>{title}</h1>")
+
+    # --- Tables ---
+    table_files = ["model_timings.csv", "summary.csv", "model_elpd_metrics.csv"]
+    for tfile in table_files:
+        tpath = os.path.join(folder_path, tfile)
+        if os.path.exists(tpath):
+            df = pd.read_csv(tpath)
+            df = df.round(2)
+
+            # --- Conditional coloring for summary.csv ---
+            if tfile == "summary.csv" and "r_hat" in df.columns:
+                # determine numeric columns
+                numeric_cols = df.select_dtypes(include="number").columns.tolist()
+                # exclude 'ess_b' and 'a' from rounding
+                round_cols = [c for c in numeric_cols if c not in ["ess_bulk", "ess_tail"]]
+
+                fmt_dict = {c: "{:.2f}" for c in round_cols}  # 2 decimal places
+                for c in ["ess_bulk", "ess_tail"]:
+                    if c in df.columns:
+                        df[c] = df[c].astype(int)
+                        fmt_dict[c] = "{:d}"  # integer format
+                # Apply red background to r_hat >= 1.01
+                df_html = df.style.format(fmt_dict).applymap(
+                    lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1.01 else "",
+                    subset=["r_hat"]
+                ).to_html()
+            else:
+                df_html = df.to_html(index=False, escape=False, border=0)
+
+            html_parts.append(f"<h2>{tfile}</h2>")
+            html_parts.append(df_html)
+
+    # --- Images ---
+    # 1) trace.png
+    trace_file = os.path.join(folder_path, "trace.png")
+    if os.path.exists(trace_file):
+        html_parts.append("<h2>Trace Plot</h2>")
+        html_parts.append(f'<img src="{os.path.basename(trace_file)}" style="max-width:100%;">')
+
+    # 2) spline plots (all spline_*.png)
+    spline_files = sorted([f for f in os.listdir(folder_path) if f.startswith("spline_") and f.endswith(".png")])
+    for sf in spline_files:
+        html_parts.append(f"<h2>{sf}</h2>")
+        html_parts.append(f'<img src="{sf}" style="max-width:100%;">')
+
+    # 3) khat.png
+    khat_file = os.path.join(folder_path, "khat.png")
+    if os.path.exists(khat_file):
+        html_parts.append("<h2>Pareto k Diagnostics</h2>")
+        html_parts.append(f'<img src="{os.path.basename(khat_file)}" style="max-width:100%;">')
+
+    
+
+    html_parts.append("</body></html>")
+
+    # --- write file ---
+    with open(out_file, "w") as f:
+        f.write("\n".join(html_parts))
+
+    print(f"HTML report written to: {out_file}")
+
+###
+
 def build_model(data, stat_names, degree=3, num_knots = 3, knot_type='quantile', orthogonal=True,
                 surveillance_name='urban_surveillance_pop_weighted', urbanisation_name='urbanisation_pop_weighted_std'):
     model = pm.Model()
@@ -70,7 +318,7 @@ def build_model(data, stat_names, degree=3, num_knots = 3, knot_type='quantile',
         # Priors
         alpha = pm.Exponential("alpha", 0.5)
         intercept = pm.Normal("intercept", mu=0, sigma=2.5)
-        if urbanisation_name:
+        if urbanisation_name is not None:
             beta_u = pm.Normal("beta_u", mu=0, sigma=1)
 
         # splines
@@ -111,9 +359,9 @@ def build_model(data, stat_names, degree=3, num_knots = 3, knot_type='quantile',
 
         # Link
         log_mu = intercept + pm.math.log(data['population'])
-        if surveillance_name:
+        if surveillance_name is not None:
             log_mu += pm.math.log(data[surveillance_name]+1e-3)
-        if urbanisation_name:
+        if urbanisation_name is not None:
             log_mu += beta_u*data[urbanisation_name]
         for stat_name in stat_names:
             log_mu += f[stat_name]
