@@ -153,7 +153,7 @@ def read_in(data_folder, admin, max_lag, start_year=2015, start_month=1, end_yea
     admin_year_month_climate_statistics = pd.read_csv(os.path.join(data_folder,
                                                                    f'admin_year_month_climate_statistics/admin{admin}_year_month_climate_statistics.csv'))
     admin_year_month_tp_statistics = pd.read_csv(os.path.join(data_folder,
-                                                                   f'admin_year_month_tp_statistics/admin{admin}_year_month_tp_statistics.csv'))
+                                                                   f'admin_year_month_tp_statistics/admin{admin}_year_month_tp_statistics_fix.csv'))
     
     admin_year_month_climate_statistics = admin_year_month_climate_statistics.merge(admin_year_month_tp_statistics, on=[f'admin{admin}', 'year', 'month'], how='left')
     admin_year_month_climate_statistics = admin_year_month_climate_statistics.drop(columns=['tp_mean_unweighted', 'tp_mean_pop_weighted'], inplace=False)
