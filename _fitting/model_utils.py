@@ -94,7 +94,7 @@ def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
         "waic": float(eval_waic.elpd_waic),
         #"p_waic": float(eval_waic.p_waic),
         "waic_se": float(eval_waic.se),
-        "waic_warning": float(eval_waic.warning),
+        "waic_warning": int(eval_waic.warning),
 
         # LOO
         "loo": float(eval_loo.elpd_loo),
@@ -112,6 +112,8 @@ def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500,
     folder_name = f'{data_name}/{model_name}'
     data_path = os.path.join(outpath, f'{data_name}/')
     os.makedirs(data_path, exist_ok=True)
+    report_path = os.path.join(outpath, f'{data_name}/reports/')
+    os.makedirs(report_path, exist_ok=True)
     output_path = os.path.join(outpath, folder_name)
     os.makedirs(output_path, exist_ok=True)
 
@@ -216,10 +218,20 @@ def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500,
             fig.savefig(fig_file, bbox_inches="tight")
             plt.close(fig)
 
-    create_html_report(output_path)
+    create_html_report([output_path, report_path], model_name=model_name, n_draws=n_draws)
     return
 
-def create_html_report(folder_path, out_file=None, title=None):
+def ess_style(x, n_draws):
+    if isinstance(x, (int, float)):
+        if x < n_draws / 5:
+            return "background-color: red;"
+        elif x < n_draws / 4:
+            return "background-color: yellow;"
+        else:
+            return "background-color: lightgreen;"
+    return ""
+
+def create_html_report(folder_path, model_name, n_draws, title=None):
     """
     Generate a simple HTML report by combining CSV tables and images
     in a folder. Assumes files are named:
@@ -230,11 +242,11 @@ def create_html_report(folder_path, out_file=None, title=None):
     - khat.png
     - spline_*.png
     """
-
-    if out_file is None:
-        out_file = os.path.join(folder_path, "_report.html")
+    out_file = []
+    for path in folder_path:
+        out_file.append(os.path.join(path, f"_report_[{model_name}].html"))
     if title is None:
-        title = f"Model Report: {os.path.basename(folder_path)}"
+        title = f"Model Report: {model_name}"
 
     html_parts = [
         f"<html><head><title>{title}</title>",
@@ -252,13 +264,13 @@ def create_html_report(folder_path, out_file=None, title=None):
     # --- Tables ---
     table_files = ["model_timings.csv", "summary.csv", "model_elpd_metrics.csv"]
     for tfile in table_files:
-        tpath = os.path.join(folder_path, tfile)
+        tpath = os.path.join(folder_path[0], tfile)
         if os.path.exists(tpath):
             df = pd.read_csv(tpath)
             df = df.round(2)
 
             # --- Conditional coloring for summary.csv ---
-            if tfile == "summary.csv" and "r_hat" in df.columns:
+            if tfile == "summary.csv":
                 # determine numeric columns
                 numeric_cols = df.select_dtypes(include="number").columns.tolist()
                 # exclude 'ess_b' and 'a' from rounding
@@ -270,10 +282,26 @@ def create_html_report(folder_path, out_file=None, title=None):
                         df[c] = df[c].astype(int)
                         fmt_dict[c] = "{:d}"  # integer format
                 # Apply red background to r_hat >= 1.01
-                df_html = df.style.format(fmt_dict).applymap(
-                    lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1.01 else "",
-                    subset=["r_hat"]
-                ).to_html()
+                df_html = (df.style.format(fmt_dict)
+                            .map(lambda x: "background-color: red;" 
+                                 if isinstance(x, (int, float)) and x >= 1.01 else "background-color: lightgreen;",
+                                 subset=["r_hat"])
+                            .map(lambda x: ess_style(x, n_draws),
+                                 subset=["ess_bulk", "ess_tail"])
+                                 ).to_html()
+                #df_html = df.style.format(fmt_dict).map(
+                    #lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1.01 else "",
+                    #subset=["r_hat"]
+                #).to_html()
+            elif tfile =="model_elpd_metrics.csv":
+                df_html = (df.style.format(fmt_dict)
+                            .map(lambda x: "background-color: red;" 
+                                 if isinstance(x, (int, float)) and x >= 1 else "background-color: lightgreen;",
+                                 subset=["waic_warning"])
+                            .map(lambda x: "background-color: red;" 
+                                 if isinstance(x, (int, float)) and x > 0 else "background-color: lightgreen;",
+                                 subset=["n_pareto_k_bad", "n_pareto_k_very_bad"])
+                            .map(lambda x: "background-color: yellow;", subset=["waic", "loo"])).to_html()
             else:
                 df_html = df.to_html(index=False, escape=False, border=0)
 
@@ -282,19 +310,19 @@ def create_html_report(folder_path, out_file=None, title=None):
 
     # --- Images ---
     # 1) trace.png
-    trace_file = os.path.join(folder_path, "trace.png")
+    trace_file = os.path.join(folder_path[0], "trace.png")
     if os.path.exists(trace_file):
         html_parts.append("<h2>Trace Plot</h2>")
         html_parts.append(f'<img src="{os.path.basename(trace_file)}" style="max-width:100%;">')
 
     # 2) spline plots (all spline_*.png)
-    spline_files = sorted([f for f in os.listdir(folder_path) if f.startswith("spline_") and f.endswith(".png")])
+    spline_files = sorted([f for f in os.listdir(folder_path[0]) if f.startswith("spline_") and f.endswith(".png")])
     for sf in spline_files:
         html_parts.append(f"<h2>{sf}</h2>")
         html_parts.append(f'<img src="{sf}" style="max-width:100%;">')
 
     # 3) khat.png
-    khat_file = os.path.join(folder_path, "khat.png")
+    khat_file = os.path.join(folder_path[0], "khat.png")
     if os.path.exists(khat_file):
         html_parts.append("<h2>Pareto k Diagnostics</h2>")
         html_parts.append(f'<img src="{os.path.basename(khat_file)}" style="max-width:100%;">')
@@ -304,8 +332,9 @@ def create_html_report(folder_path, out_file=None, title=None):
     html_parts.append("</body></html>")
 
     # --- write file ---
-    with open(out_file, "w") as f:
-        f.write("\n".join(html_parts))
+    for o in out_file:
+        with open(o, "w") as f:
+            f.write("\n".join(html_parts))
 
     print(f"HTML report written to: {out_file}")
 
