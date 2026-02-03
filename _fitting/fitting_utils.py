@@ -456,15 +456,15 @@ def plot_spline(idata, stat_name, var, sigma_var, B, data, knots=None, figsize=(
     index = np.argsort(data)
     plt.figure(figsize=figsize)
     if knots is not None:
-        if invert_log:
-                plot_knots = np.exp(knots)-1e-6
+        if (invert_log)&(stat_name[0:2]=='tp'):
+            plot_knots = (np.exp(knots)-1e-6)*1000
         else:
-             plot_knots = knots
+            plot_knots = knots
         plt.vlines(plot_knots, ymin=np.min(f_s1_lower), ymax=np.max(f_s1_upper), label='knots')
         if show_basis:
             x = np.linspace(np.min(data), np.max(data), 1000)
-            if invert_log:
-                xx = np.exp(x)-1e-6
+            if (invert_log)&(stat_name[0:2]=='tp'):
+                xx = (np.exp(x)-1e-6)*1000
             else:
                  xx = x
             BB = dmatrix("bs(x, knots=knots, degree=3, include_intercept=False)-1", {"x": x, "knots": knots},)
@@ -480,18 +480,16 @@ def plot_spline(idata, stat_name, var, sigma_var, B, data, knots=None, figsize=(
 
     x = np.array(data)[index]
     
-    if stat_name[0:2]=='tp':
-        if invert_log:
+    if (invert_log)&(stat_name[0:2]=='tp'):
             x = (np.exp(x)-1e-6) * 1000
     plt.plot(x, f_s1_mean[index], color='red', label='Mean spline effect')
     plt.fill_between(x, f_s1_lower[index], f_s1_lower5[index], color='red', alpha=0.3, label='95% CI')
     plt.fill_between(x, f_s1_lower5[index], f_s1_upper5[index], color='blue', alpha=0.3, label='50% CI')
     plt.fill_between(x, f_s1_upper5[index], f_s1_upper[index], color='red', alpha=0.3)
 
-    abbrev_stat_name = abbrev_stat(stat_name)
-    if invert_log:
+    abbrev_stat_name = abbrev_stat(stat_name)  
+    if (invert_log)&(stat_name[0:2]=='tp'):
         abbrev_stat_name = abbrev_stat_name.replace("_log", "")
-    if invert_log:
         xlab = f'{abbrev_stat_name} ({units[stat_name[0:2]]})'
     else:
         xlab = f'{abbrev_stat_name} ({units_log[stat_name[0:2]]})'

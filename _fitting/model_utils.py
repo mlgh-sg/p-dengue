@@ -119,7 +119,7 @@ def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
         "pareto_k_mean": float(eval_loo.pareto_k.mean()),
     }
 ###
-def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500, n_tune=500, sampler="nutpie", invert_log=False, task=None):
+def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500, n_tune=500, sampler="nutpie", invert_log=False, task=None, replace=False):
     
     if task is None:
         data_path = os.path.join(outpath, f'{data_name}/')
@@ -141,7 +141,13 @@ def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500,
     output_path = os.path.join(data_path, f'outputs/{model_name}')
     os.makedirs(output_path, exist_ok=True)
 
-    
+    # if idata already exists, skip
+    idata_file = os.path.join(idata_path, f"idata_[{model_name}].nc")
+    if not replace:
+        if os.path.exists(idata_file):
+            print(f"Skipping {model_name}, data already exists.")
+            create_html_report(output_path, model_name=model_name, n_draws=n_draws, reports_folder=report_path, replace=False)
+            return
 
     model, model_B, model_knot_list = build_model(data.copy(), **model_settings)
     with model:
@@ -217,7 +223,6 @@ def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500,
     ####
 
     # Save inference data
-    idata_file = os.path.join(idata_path, f"idata_[{model_name}].nc")
     idata.to_netcdf(idata_file)
 
     # Save summary table
@@ -267,7 +272,7 @@ def ess_style(x, n_draws):
             return "background-color: lightgreen;"
     return ""
 
-def create_html_report(model_folder, model_name, n_draws, reports_folder=None, title=None):
+def create_html_report(model_folder, model_name, n_draws, reports_folder=None, title=None, replace=False):
     """
     Generate HTML report for a single model.
 
@@ -281,11 +286,14 @@ def create_html_report(model_folder, model_name, n_draws, reports_folder=None, t
 
     # Paths for output HTML files
     out_files = [os.path.join(model_folder, f"report_[{model_name}].html")]
-    out_files_png = [os.path.join(model_folder, f"report_[{model_name}].png")]
     if reports_folder:
         os.makedirs(reports_folder, exist_ok=True)
         out_files.append(os.path.join(reports_folder, f"report_[{model_name}].html"))
-        out_files_png.append(os.path.join(reports_folder, f"report_[{model_name}].png"))
+    # If not replacing, check if files exist
+    if not replace:
+        if all(os.path.exists(f) for f in out_files):
+            print(f"Skipping HTML report for {model_name}, report already exists.")
+            return
 
     if title is None:
         title = f"Model Report: {model_name}"
