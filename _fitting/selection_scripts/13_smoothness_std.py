@@ -87,8 +87,8 @@ if __name__ == "__main__":
     # Build model dictionary
     model_dict = {}
     
-    for num_knots in [5, 10, 15, 20, 25, 30, 40, 50, 60, 80]:
-        for p in [1.0, 2.0, 3.5, 5.0, 7.0, 10.0, 12.5, 15.0, 20.0]:
+    for num_knots in [5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 80]:
+        for p in [0.1, 0.5, 1.0, 2.0, 3.5, 5.0, 7.0, 10.0, 12.5, 15.0, 20.0]:
             stat_names = [f"t2m_mean_pop_weighted(0)"]
             settings = {
                 'alpha_type': 'exponential', 'alpha_parameters': {'lam': 0.5},
@@ -100,7 +100,7 @@ if __name__ == "__main__":
                 'stat_names': stat_names, 'num_knots': num_knots, 'knot_type': 'equispaced', 'degree': 3,
                 'spline_implementation': 'svd', 'spline_type': 'halfnormal', 'spline_parameters': {'sigma_w_sigma': 10.0},
                 'penalty_order': 2, 'penalty_type': 'halfnormal', 'penalty_parameters': {'p': p}, 'penalty_std': True,
-                'cutoff': 19.0,
+                'cutoff': None,
                 'exclude': ['intercept', 'beta_u', 'alpha', 'zi_b1', 'zi_c'],}
             
             model_name = build_model_name(settings['alpha_type'], settings['alpha_parameters'],
@@ -123,7 +123,7 @@ if __name__ == "__main__":
     
     # Number of workers (adjust based on your server)
     # Each model uses n_chains, so N_WORKERS * n_chains = total cores used
-    N_WORKERS = 5
+    N_WORKERS = 4
     
     with Pool(N_WORKERS, initializer=init_worker) as p:
         results = p.map(worker, tasks)

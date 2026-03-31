@@ -24,9 +24,78 @@ import seaborn as sns
 from scipy.special import erf
 from multiprocessing import Pool
 
+
+def abbrev_surveillance(name):
+    if name is None:
+        return "nosurv"
+    base = "surv"
+    if "urban" in name:
+        base = "urb_surv"
+    weight = "p" if "pop_weighted" in name else "u"
+    return f"{base}_{weight}"
+
+def abbrev_urbanisation(name):
+    if name is None:
+        return "nourb"
+    base = "urb"
+    weight = "p" if "pop_weighted" in name else "u"
+    std = "_std" if "std" in name else ""
+    return f"{base}_{weight}{std}"
+
+def abbrev_stat(stat):
+    # remove spaces
+    s = stat.replace(" ", "")
+    
+    # lag extraction: "(k)"
+    lag = re.search(r"\((\d+)\)", s)
+    lag_str = f"({lag.group(1)})" if lag else ""
+    
+    # check if _log is present
+    has_log = "_log" in s
+    
+    # weighting
+    if "pop_weighted" in s:
+        w = "p"
+    elif "unweighted" in s:
+        w = "u"
+    else:
+        w = ""
+    
+    # remove weighting and lag, keep everything else
+    base = re.sub(r"_?(pop_weighted|unweighted).*", "", s)
+    
+    # reattach _log if it was in original
+    if has_log and not base.endswith("_log"):
+        base += "_log"
+    
+    return f"{base}_{w}{lag_str}"
+
+def model_settings_to_name(settings):
+    surv = abbrev_surveillance(settings.get("surveillance_name"))
+    urb = abbrev_urbanisation(settings.get("urbanisation_name"))
+    
+    stats = settings.get("stat_names", [])
+    if len(stats) == 0:
+        stat_str = "nostat"
+    else:
+        stat_str = "+".join(abbrev_stat(s) for s in stats)
+    
+    deg = settings.get("degree")
+    k = settings.get("num_knots")
+    p = settings.get("penalty_parameters", {}).get("p")
+    
+    knot_map = {"quantile": "q", "uniform": "u"}
+    kt = knot_map.get(settings.get("knot_type"), settings.get("knot_type"))
+    
+    if len(stats) == 0:
+        return f"[{surv}__{urb}][{stat_str}][]"
+    else:
+        return f"[{surv}__{urb}][{stat_str}][{k}, {p}]"
+    
+
 def fig_to_base64(fig):
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=150)
+    fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
     buf.seek(0)
     img_base64 = base64.b64encode(buf.read()).decode("utf-8")
     plt.close(fig)
@@ -180,7 +249,7 @@ def plot_link_spline(x, idata, stat_name, B, knots, var_names=['zi_b0', 'zi_b1']
     plt.grid()
     return plt.gcf()
 
-def plot_exp_spline(x, idata, stat_name, B, knots):
+def plot_exp_spline_(x, idata, stat_name, B, knots):
     id = np.argsort(x)
     x = x[id]
     x_mean = np.mean(x)
@@ -223,6 +292,75 @@ def plot_exp_spline(x, idata, stat_name, B, knots):
     plt.legend()
     plt.grid()
     return plt.gcf()
+
+def plot_exp_spline(x, idata, stat_name, B, knots, data=None, freq_transform=lambda x: x, invert_log=True):
+    id = np.argsort(x)
+    x = x[id]
+
+    data_local = x
+
+    knots_local = np.array(knots, copy=True)
+    B_local = np.array(B, copy=True, order="F")
+    B_plot = B_local[id]
+    
+    w_samples = idata.posterior[f'w({stat_name})'].stack(draws=("chain", "draw")).values
+    f_samples = B_plot @ w_samples
+    s_samples = np.exp(f_samples)
+    link_samples = s_samples.T
+
+    link_mean = link_samples.mean(axis=0)
+    link_lower = np.percentile(link_samples, 2.5, axis=0)
+    link_upper = np.percentile(link_samples, 97.5, axis=0)
+    link_lower5 = np.percentile(link_samples, 25, axis=0)
+    link_upper5 = np.percentile(link_samples, 75, axis=0)
+    link_hdi = np.array([link_lower, link_upper]).T
+
+    y_max = np.minimum(np.maximum(np.ceil(link_mean.max() / 0.5) * 0.5, 1.0), 10.0)
+    #print(y_max)
+    y_min = -0.01
+    y_range = y_max - y_min
+    label_overhead_inches = 1.5
+    fig_height = (y_range / 0.5) * 1.5 + label_overhead_inches
+    fig_width = 8
+
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    # inverse log trasformation
+    if (invert_log) & (stat_name[0:2] == 'tp'):
+        plot_knots = (np.exp(knots_local) - 1e-6) * 1000
+        if data is not None:
+            plot_data = (np.exp(data_local) - 1e-6) * 1000
+    else:
+        plot_knots = knots_local
+        if data is not None:
+            plot_data = data_local
+
+    # histogram with knot-defined bins
+    if data is not None:
+        raw_vals = plot_data
+        bins = np.concatenate([[raw_vals.min()], plot_knots, [raw_vals.max()]])
+        counts, edges = np.histogram(raw_vals, bins=bins)
+        transformed = freq_transform(counts)
+        # scale to y_range for visibility
+        transformed_scaled = transformed / transformed.max() * 1.0
+        ax.bar(edges[:-1], transformed_scaled, width=np.diff(edges), align='edge',
+               color='green', alpha=0.3, label=f'density', zorder=0)
+
+    for i_, k_ in enumerate(plot_knots):
+        ax.axvline(k_, color='green', linestyle='--', label='Knots' if i_ == 0 else None)
+
+    ax.set_ylim(y_min, y_max)
+    ax.plot(plot_data, link_mean, label='Mean Link', color='blue')
+    ax.fill_between(plot_data, link_hdi[:, 0], link_hdi[:, 1], color='blue', alpha=0.3, label='95% HDI')
+    ax.fill_between(plot_data, link_lower5, link_upper5, color='blue', alpha=0.3, label='50% HDI')
+    ax.set_xlabel('x')
+    ax.set_yticks(np.arange(0.0, y_max + 0.5, 0.25))
+    ax.set_ylabel('Multiplicative Effect (Spline)')
+    ax.set_title(f'Posterior of Multiplicative Effect (Spline)')
+    ax.legend()
+    ax.grid()
+
+    return fig
 
 units = {'t2':'C˚', 'rh':'%RH', 'tp':'mm'}
 units_log = {'t2':'C˚', 'rh':'%RH', 'tp':'log(m)'}
@@ -356,6 +494,7 @@ def go(data, m, model_dict, idata_dict, time_dict, B_dict,
                 tune=tune,
                 draws=draws,
                 chains=4,
+                cores=4,
                 discard_tuned_samples=True,
                 store_divergences=True,
                 nuts_sampler="nutpie",
@@ -436,7 +575,8 @@ def go(data, m, model_dict, idata_dict, time_dict, B_dict,
                     idata_dict[m],
                     stat_name,
                     B_dict[m][stat_name],
-                    knot_list_dict[m][stat_name]
+                    knot_list_dict[m][stat_name],
+                    data=data,
                 )
                 exp_spline_imgs.append(fig_to_base64(fig_exp_spline))
     
@@ -630,7 +770,7 @@ def time_models(model_dict, idata_dict, models_list, iter):
         for i in range(iter):
             with model_dict[m]:
                 s0 = time.time()
-                idata_dict[m] = pm.sample(tune=1000, draws=4000, chains=4, progressbar=False,
+                idata_dict[m] = pm.sample(tune=1000, draws=4000, chains=4, cores=4, progressbar=False,
                                             discard_tuned_samples=True, nuts_sampler="nutpie", store_divergences=True)
                 s1 = time.time()
                 pm.compute_log_likelihood(idata_dict[m], progressbar=False)
@@ -723,7 +863,17 @@ def build_model_name(alpha_type, alpha_parameters,
                      spline_implementation, spline_type, spline_parameters,
                      penalty_order, penalty_type, penalty_parameters, penalty_std,
                      cutoff, beta_u_type, beta_u_parameters,
-                     exclude=None):
+                     exclude=None,
+                     surveillance_name=None,
+                     urbanisation_name='urbanisation_pop_weighted_std'):
+
+    surv = abbrev_surveillance(surveillance_name)
+    urb = abbrev_urbanisation(urbanisation_name)
+    stats = stat_names or []
+    if len(stats) == 0:
+        stat_str = "nostat"
+    else:
+        stat_str = "+".join(abbrev_stat(s) for s in stats)
 
     exclude = exclude or []
 
@@ -731,19 +881,20 @@ def build_model_name(alpha_type, alpha_parameters,
         return "(" + ",".join(f"{k}={v}" for k, v in params.items()) + ")"
 
     parts = []
-
+    
     # Spline stats 0
     if stat_names is not None and 'stats' not in exclude:
-        stats_str = "+".join(stat_names)
-        parts.append(f"stats[{stats_str}]")
-        parts.append(f"knots({num_knots},{knot_type},deg={degree},{spline_implementation},spline={spline_type}{',' + fmt_params(spline_parameters) if spline_parameters else ''})")
+        # stats_str = "+".join(stat_names)
+        # parts.append(f"stats[{stats_str}]")
+        parts.append(f"knots({num_knots},{knot_type},deg{degree},{spline_implementation})") #,spline={spline_type}{',' + fmt_params(spline_parameters) if spline_parameters else ''})")
 
     # Penalty 1
     if penalty_order is not None and 'penalty' not in exclude:
-        pen_str = f"pen(ord={penalty_order}"
-        if penalty_std is not None:
-            pen_str += f",std={penalty_std}"
-        pen_str += f",type={penalty_type}"
+        #pen_str = f"pen(ord={penalty_order}"
+        pen_str = f"pen(o{penalty_order}"
+        #if penalty_std is not None:
+            #pen_str += f",std={penalty_std}"
+        #pen_str += f",type={penalty_type}"
         if penalty_type == 'halfnormal' and penalty_parameters is not None:
             pen_str += "," + ",".join(f"{k}={v}" for k, v in penalty_parameters.items())
         pen_str += ")"
@@ -774,6 +925,8 @@ def build_model_name(alpha_type, alpha_parameters,
         parts.append(f"betau({beta_u_type},{fmt_params(beta_u_parameters)})")
 
     parts = [parts[i] for i in [2, 1, 0, 3, 4, 5, 6, 7, 8] if i < len(parts)]
+    # parts = [f"[{surv}, {urb}][{stat_str}]"] + parts
+    parts = [f"[{stat_str}]"] + parts
     return "__".join(parts)
 
 def build_sig_spline_p_model(data,
@@ -787,7 +940,9 @@ def build_sig_spline_p_model(data,
                              spline_implementation, spline_type, spline_parameters,
                              penalty_order, penalty_type, penalty_parameters, penalty_std,
                              cutoff, 
-                             exclude=None):
+                             exclude=None,
+                             surveillance_name=None,
+                             urbanisation_name='urbanisation_pop_weighted_std'):
 
     m = build_model_name(alpha_type, alpha_parameters,
                         intercept_type, intercept_parameters,
@@ -809,7 +964,6 @@ def build_sig_spline_p_model(data,
             alpha = pm.Gamma("alpha", alpha=alpha_parameters['a'], beta=alpha_parameters['b'])
         if intercept_type == 'normal':
             intercept = pm.Normal("intercept", mu=intercept_parameters['mu'], sigma=intercept_parameters['sigma'])
-        urbanisation_name = 'urbanisation_pop_weighted_std'
         if urbanisation_name is not None:
             beta_u = pm.Normal("beta_u", mu=beta_u_parameters['mu'], sigma=beta_u_parameters['sigma'])
         
@@ -1040,8 +1194,7 @@ def build_sig_spline_p_model(data,
 
     # m += f"__non-centred-w"
     # m += "boundary_knots"
-    m = "smooth_sig_" + m
-    m = m[:100]
+    m = m[:200]
     
     return model, m, B, knot_list
 
@@ -1094,8 +1247,10 @@ def fit_sig_spline_p_model(data, data_name,
                 print(f"Log likelihood missing, recomputing...")
                 pm.compute_log_likelihood(idata, progressbar=False)
                 tmp_file = os.path.join(idata_path, f"temp_idata_[{model_name}].nc")
-                idata.to_netcdf(tmp_file)
+                idata_thinned = idata.sel(draw=slice(None, None, 12))
+                idata_thinned.to_netcdf(tmp_file)
                 os.replace(tmp_file, idata_file)  # atomic replace
+                print('saved idata to', idata_file)
                 times = (0.0, 0.0)
             else:
                 with open(os.path.join(output_path, "times.txt"), "r") as f:
@@ -1112,6 +1267,7 @@ def fit_sig_spline_p_model(data, data_name,
                 tune=n_tune,
                 draws=n_draws,
                 chains=n_chains,
+                cores=n_chains,
                 discard_tuned_samples=True,
                 store_divergences=True,
                 nuts_sampler="nutpie",
@@ -1131,7 +1287,9 @@ def fit_sig_spline_p_model(data, data_name,
             with open(os.path.join(output_path, "times.txt"), "w") as f:
                 f.write(f"{times[0]}\n{times[1]}\n")
             # Save inference data
-            idata.to_netcdf(idata_file)
+            idata_thinned = idata.sel(draw=slice(None, None, 12))
+            idata_thinned.to_netcdf(idata_file)
+            print('saved idata to', idata_file)
             print(f'\nPosterior Sampling {s1 - s0:.2f} seconds')
             print(f'Log Likelihood Compute {s2 - s1:.2f} seconds \n')
 
@@ -1186,7 +1344,7 @@ def fit_sig_spline_p_model(data, data_name,
 
     khat_fig = az.plot_khat(eval_psis_loo_elpd).get_figure()
     fig_file = os.path.join(output_path, f"khat.png")
-    khat_fig.savefig(fig_file, bbox_inches="tight")
+    # khat_fig.savefig(fig_file, bbox_inches="tight")
     plt.close(khat_fig)
     ####
 
@@ -1284,7 +1442,8 @@ def fit_sig_spline_p_model(data, data_name,
                     idata,
                     stat_name,
                     B[stat_name],
-                    knot_list[stat_name]
+                    knot_list[stat_name],
+                    data=data
                 )
                 fig_exp_spline_file = os.path.join(output_path, f"spline_{stat_name}.png")
                 # fig_exp_spline.savefig(fig_exp_spline_file, bbox_inches="tight", dpi=200)

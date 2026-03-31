@@ -266,7 +266,7 @@ def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500,
         );
         if isinstance(fig, plt.Figure):
             fig_file = os.path.join(output_path, f"spline_{stat_name}.png")
-            fig.savefig(fig_file, bbox_inches="tight", dpi=500)
+            fig.savefig(fig_file, bbox_inches="tight", dpi=100)
             plt.close(fig)
 
     create_html_report(output_path, model_name=model_name, n_draws=n_draws, reports_folder=report_path, replace=(not check_report), clear_images=True)
@@ -542,7 +542,7 @@ def model_fit_Bdropcentred(data, data_name,
         );
         if isinstance(fig, plt.Figure):
             fig_file = os.path.join(output_path, f"spline_{stat_name}.png")
-            fig.savefig(fig_file, bbox_inches="tight", dpi=500)
+            fig.savefig(fig_file, bbox_inches="tight", dpi=100)
             plt.close(fig)
 
     create_html_report(output_path, model_name=model_name, n_draws=n_draws, reports_folder=report_path, replace=(not check_report), clear_images=True)
