@@ -929,7 +929,7 @@ def build_model_name(alpha_type, alpha_parameters,
     parts = [f"[{stat_str}]"] + parts
     return "__".join(parts)
 
-def build_sig_spline_p_model(data,
+def build_sig_spline_p_model_(data,
                              alpha_type, alpha_parameters,
                              intercept_type, intercept_parameters,
                              beta_u_type, beta_u_parameters,
@@ -1154,6 +1154,168 @@ def build_sig_spline_p_model(data,
                             smoothness = pm.Deterministic(f"smoothness({stat_name})", 1/h**3*(2/3*pt.dot(DVw, DVw)))
                             full_smoothness = pm.Deterministic(f"full_smoothness({stat_name})",
                                                                1/h**3*(2/3*pt.dot(DVw, DVw) + 1/6*pt.dot(DVw1, DVw2)))
+
+        # Link
+        log_mu = intercept + pm.math.log(data['population'])
+        surveillance_name = None
+        if surveillance_name is not None:
+            log_mu += pm.math.log(pm.math.max(data[surveillance_name], pm.math.log(1e-3)))
+        if urbanisation_name is not None:
+            log_mu += beta_u*data[urbanisation_name]
+        if stat_names is not None:
+            for stat_name in stat_names:
+                log_mu += f[stat_name]
+
+        # Zero-inflation component
+        if link is None:
+            y_obs = pm.NegativeBinomial('y_obs', mu=pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
+        else:
+            x = data[link_stat_name].values
+            x_mean = np.mean(x)
+            x_std_dev = np.std(x)
+            x_std = (x - x_mean) / x_std_dev
+            if link == 'logit':
+                if b1_type == 'halfnormal':
+                    zi_b1 = pm.HalfNormal("zi_b1", sigma=b1_parameters['sigma'])
+                if c_type == 'normal':
+                    zi_c = pm.Normal("zi_c", mu=c_parameters['mu'], sigma=c_parameters['sigma'])
+                zi_b0 = pm.Deterministic("zi_b0", -zi_c * zi_b1)
+                zi_x = zi_b0 + zi_b1 * x_std
+
+                #zi_b0_true_scale = pm.Deterministic("zi_b0_true_scale", - zi_b1/x_std_dev*(zi_c*x_std_dev)+x_mean)
+                #zi_b1_true_scale = pm.Deterministic("zi_b1_true_scale", zi_b1 / x_std_dev)
+                zi_c_true_scale = pm.Deterministic("zi_c_true_scale", zi_c * x_std_dev + x_mean)
+            
+                # Likelihood
+                if link_type == 'multiplicative':
+                    y_obs = pm.NegativeBinomial('y_obs', mu=pm.math.invlogit(zi_x) * pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
+                elif link_type == 'additive':
+                    y_obs = pm.ZeroInflatedNegativeBinomial('y_obs', psi=pm.math.invlogit(zi_x), mu=pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
+
+    # m += f"__non-centred-w"
+    # m += "boundary_knots"
+    m = m[:200]
+    
+    return model, m, B, knot_list
+
+def build_sig_spline_p_model(data,
+                             alpha_type, alpha_parameters,
+                             intercept_type, intercept_parameters,
+                             beta_u_type, beta_u_parameters,
+                             link, link_stat_name, link_type,
+                             b1_type, b1_parameters,
+                             c_type, c_parameters,
+                             stat_names, num_knots, knot_type, degree,
+                             spline_implementation, spline_type, spline_parameters,
+                             penalty_order, penalty_type, penalty_parameters, penalty_std,
+                             cutoff, 
+                             exclude=None,
+                             surveillance_name=None,
+                             urbanisation_name='urbanisation_pop_weighted_std',
+                             boundary_penalty=1.0):
+
+    m = build_model_name(alpha_type, alpha_parameters,
+                        intercept_type, intercept_parameters,
+                        link, link_stat_name, link_type,
+                        b1_type, b1_parameters,
+                        c_type, c_parameters,
+                        stat_names, num_knots, knot_type, degree,
+                        spline_implementation, spline_type, spline_parameters,
+                        penalty_order, penalty_type, penalty_parameters, penalty_std,
+                        cutoff, beta_u_type, beta_u_parameters,
+                        exclude=exclude)
+
+    model = pm.Model()
+    with model:
+        # Priors
+        if alpha_type == 'exponential':
+            alpha = pm.Exponential("alpha", lam=alpha_parameters['lam'])
+        elif alpha_type == 'gamma':
+            alpha = pm.Gamma("alpha", alpha=alpha_parameters['a'], beta=alpha_parameters['b'])
+        if intercept_type == 'normal':
+            intercept = pm.Normal("intercept", mu=intercept_parameters['mu'], sigma=intercept_parameters['sigma'])
+        if urbanisation_name is not None:
+            beta_u = pm.Normal("beta_u", mu=beta_u_parameters['mu'], sigma=beta_u_parameters['sigma'])
+        
+        # splines
+        B = None
+        knot_list = None
+        if stat_names is not None:
+            knot_list = {}
+            B = {}
+            sigma_w = {}
+            w = {}
+            f = {}
+            for stat_name in stat_names:
+                num_knots_ = num_knots
+                d = data[stat_name].values
+                # d = np.clip(d, np.percentile(d, 0.1), np.percentile(d, 99.9))
+                if stat_name == link_stat_name:
+                    num_knots_ = int(num_knots * (np.max(d)-cutoff) / (np.max(d)-np.min(d)))
+                    d = np.clip(d, cutoff, None)  
+                if knot_type=='equispaced':
+                    knot_list[stat_name] = np.linspace(np.min(d), np.max(d), num_knots_+2)[1:-1]
+                    # knot_list[stat_name] = np.linspace(np.min(d), np.max(d), num_knots+2)[:]
+                elif knot_type=='quantile':
+                    knot_list[stat_name] = np.percentile(np.unique(d), np.linspace(0, 100, num_knots_ + 2))[1:-1]
+                else:
+                    print('knot_list must be quantile or equispaced')
+
+                B_full = dmatrix(f"bs(s, knots=knots, degree=degree, include_intercept=True)-1",
+                        {"s": d, "knots": knot_list[stat_name], "degree":degree})
+
+                if spline_implementation == 'svd':
+                    B_full_centred = B_full - B_full.mean(axis=0)  # centre the spline basis functions
+                    U, S, Vt = np.linalg.svd(B_full_centred, full_matrices=False)
+                    k = len(S)
+                    r = np.sum(S > 1e-10)
+                    U_r = U[:, :r]
+                    S_r = S[:r]
+                    Vt_r = Vt[:r, :]
+                    X_r = U_r @ np.diag(S_r)
+                    X_r = np.ascontiguousarray(X_r)  # ensure X_r is C-contiguous for PyMC
+                    B[stat_name] = X_r
+
+                    # Spline coefficients
+                    if spline_type == 'halfnormal':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfNormal(f"sigma_w({stat_name})", sigma=spline_parameters['sigma_w_sigma'])
+                    elif spline_type == 'halfstudentt':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfStudentT(f"sigma_w({stat_name})", nu=spline_parameters['sigma_w_nu'], sigma=spline_parameters['sigma_w_sigma'])
+                    w[stat_name] = pm.Normal(f"w({stat_name})", mu=0, sigma=sigma_w[stat_name], size=B[stat_name].shape[1], dims="splines")
+                    # ws0 = B[stat_name].shape[1]
+                    # w_ = pm.Normal(f"w_({stat_name})", mu=0, sigma=1.0, size=B[stat_name].shape[1], dims="splines")
+                    # w[stat_name] = pm.Deterministic(f"w({stat_name})", w_ * sigma_w[stat_name])
+
+                    f[stat_name] = pm.math.dot(B[stat_name], w[stat_name])
+
+                    if penalty_order is not None:
+                        if penalty_type == 'halfnormal':
+                            #p_ = pm.HalfNormal(f"p_({stat_name})", sigma=1.0)
+                            h = (np.max(d) - np.min(d)) / (num_knots + 1)
+                            #p = pm.Deterministic(f'p({stat_name})', p_ * penalty_parameters['sigma'])
+                            p = pm.Deterministic(f'p({stat_name})', pt.as_tensor_variable(penalty_parameters['p']))
+
+                        D = difference_matrix(k, order=penalty_order)
+                        DV = D @ Vt_r.T
+                        DV = np.ascontiguousarray(DV)
+                        DV = pt.as_tensor_variable(DV)
+                        
+                        if penalty_std:
+                            raise ValueError("penalty_std=True is not allowed")
+                        else:
+                            DVw = pt.dot(DV, w[stat_name])
+                            DVw1 = DVw[:-1]
+                            DVw2 = DVw[1:]
+                            int_d2f2 = 1/h**3*(2/3*pt.dot(DVw, DVw) + 1/6*pt.dot(DVw1, DVw2))
+                            pm.Potential(f"spline_penalty({stat_name})", (-pt.log(p) -1/2*int_d2f2/p**2) * r)
+                            pot = pm.Deterministic(f"pot({stat_name})", (-pt.log(p) -1/2*int_d2f2/p**2) * r)
+                            pot_unit = pm.Deterministic(f"pot_unit({stat_name})", pot/r)
+                            smoothness = pm.Deterministic(f"smoothness({stat_name})", 1/h**3*(2/3*pt.dot(DVw, DVw)))
+                            full_smoothness = pm.Deterministic(f"full_smoothness({stat_name})",
+                                                               1/h**3*(2/3*pt.dot(DVw, DVw) + 1/6*pt.dot(DVw1, DVw2)))
+                        if boundary_penalty is not None:
 
         # Link
         log_mu = intercept + pm.math.log(data['population'])
