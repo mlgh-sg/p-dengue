@@ -4,6 +4,7 @@ project_root = Path.cwd()  # importing functions from other folders
 sys.path.insert(0, str(project_root))
 
 import os
+import random
 from multiprocessing import Pool
 from _data.data_utils import read_in
 from _fitting.model_utils import data_settings_to_name, compare_models
@@ -32,7 +33,7 @@ else:
 data_settings = {'admin':2, 'max_lag':6, 'start_year':2016, 'start_month':1, 'end_year':2019, 'end_month':12}
 data_name = data_settings_to_name(data_settings)
 
-fitting_task = 'smooth_s1|6_selection_test'
+fitting_task = 'smooth_exact_s1|6_selection'
 
 ################################################################################
 
@@ -65,7 +66,7 @@ def worker(task):
             check_idata=True,
             clear_idata=False,
             basis_scale=1,
-            model_builder='build_sig_spline_p_model',
+            model_builder='build_model_equispaced_exact',
             show = {'summary': True, 'trace': True, 'pair': False, 'metrics': True,
                     'spline': True, 'exp_spline': True, 'link': True, 'link_spline': True,
                     'divergences': True}
@@ -91,6 +92,13 @@ statistics = [stat for stat in statistics if any(f"({lag})" in stat for lag in l
 print(len(statistics))
 print(statistics)
 ################################################################################
+#p_vals = [1.0, 16.0]
+#num_knots_list = [30]
+#statistics = ['rh_mean_pop_weighted(0)', 't2m_mean_pop_weighted(0)', 't2m_min_pop_weighted(3)', 'tp_24hmax_pop_weighted_log(5)']
+
+# p_vals = [1.0, 2.5, 5.0, 7.5, 10.0, 12.5, 16.0, 20.0, 25.0, 1000.0]
+# num_knots_list = [5, 10, 15, 20, 25, 30, 35, 40, 50, 60]
+
 p_vals = [1.0, 2.5, 5.0, 7.5, 10.0, 12.5, 16.0, 20.0, 25.0, 1000.0]
 num_knots_list = [5, 10, 15, 20, 25, 30, 35, 40, 50, 60]
 
@@ -131,14 +139,15 @@ if __name__ == "__main__":
                 model_dict[model_name] = settings
         
     # Create tasks list
-    tasks = list(model_dict.items())
+    tasks = list(model_dict.items())[2::3]
+    random.shuffle(tasks)
     
     print(f"Fitting {len(tasks)} models in total...")
     print(f"Data: {data_name}")
     
     # Number of workers (adjust based on your server)
     # Each model uses n_chains, so N_WORKERS * n_chains = total cores used
-    N_WORKERS = 4
+    N_WORKERS = 5
     
     with Pool(N_WORKERS, initializer=init_worker) as p:
         results = p.map(worker, tasks)

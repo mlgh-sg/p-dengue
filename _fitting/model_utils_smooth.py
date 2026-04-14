@@ -1,3 +1,6 @@
+# if using conda env for jax GPU
+import subprocess, os; os.environ["CUDA_VISIBLE_DEVICES"] = str(max([(int(l.split(',')[0]), int(l.split(',')[1])) for l in subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,nounits,noheader'], capture_output=True, text=True).stdout.strip().split('\n')], key=lambda x: x[1])[0])
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -13,6 +16,11 @@ from pymc.variational.callbacks import CheckParametersConvergence
 import io
 import base64
 import re
+
+# if using uv env for CPU
+# import pytensor
+ #pytensor.config.mode='NUMBA'
+
 import pytensor.tensor as pt
 from pytensor.gradient import disconnected_grad
 from scipy.sparse.linalg import eigsh
@@ -23,6 +31,8 @@ warnings.filterwarnings("ignore", module="arviz")
 import seaborn as sns
 from scipy.special import erf
 from multiprocessing import Pool
+from _fitting.spline_utils import *
+
 
 
 def abbrev_surveillance(name):
@@ -102,25 +112,26 @@ def fig_to_base64(fig):
     return img_base64
 
 def plot_link(x, idata, var_names=['zi_b0', 'zi_b1'], link='logit'):
+    idata_posterior = idata.posterior
     x_mean = np.mean(x)
     x_std_dev = np.std(x)
     
-    if np.all([v in idata.posterior for v in var_names]):
-        b0_samples = idata.posterior[var_names[0]].values.flatten()
-        b1_samples = idata.posterior[var_names[1]].values.flatten()
+    if np.all([v in idata_posterior for v in var_names]):
+        b0_samples = idata_posterior[var_names[0]].values.flatten()
+        b1_samples = idata_posterior[var_names[1]].values.flatten()
 
         x0_samples = -b0_samples / (b1_samples) * x_std_dev + x_mean
         link_samples = np.array([b0 + b1 * ((x - x_mean) / x_std_dev) for b0, b1 in zip(b0_samples, b1_samples)])
-    elif all(v in idata.posterior for v in ['zi_c', 'zi_b01', 'zi_b11']):
-        c_samples = idata.posterior['zi_c'].values.flatten()
-        b01_samples = idata.posterior['zi_b01'].values.flatten()
-        b11_samples = idata.posterior['zi_b11'].values.flatten()
+    elif all(v in idata_posterior for v in ['zi_c', 'zi_b01', 'zi_b11']):
+        c_samples = idata_posterior['zi_c'].values.flatten()
+        b01_samples = idata_posterior['zi_b01'].values.flatten()
+        b11_samples = idata_posterior['zi_b11'].values.flatten()
         x0_samples = c_samples.copy() * x_std_dev + x_mean
         link_samples = np.array([np.maximum(0, ((x - x_mean) / x_std_dev) - c) * (b01 - b11) + b11 * (((x - x_mean) / x_std_dev) - c) for c, b01, b11 in zip(c_samples, b01_samples, b11_samples)])
-    elif all(v in idata.posterior for v in ['zi_c', 'zi_b1', 'zi_b1d']):
-        c_samples = idata.posterior['zi_c'].values.flatten()
-        b1_samples = idata.posterior['zi_b1'].values.flatten()
-        b1d_samples = idata.posterior['zi_b1d'].values.flatten()
+    elif all(v in idata_posterior for v in ['zi_c', 'zi_b1', 'zi_b1d']):
+        c_samples = idata_posterior['zi_c'].values.flatten()
+        b1_samples = idata_posterior['zi_b1'].values.flatten()
+        b1d_samples = idata_posterior['zi_b1d'].values.flatten()
         x0_samples = c_samples.copy() * x_std_dev + x_mean
         link_samples = np.array([np.maximum(0, ((x - x_mean) / x_std_dev) - c) * b1d + b1 * (((x - x_mean) / x_std_dev) - c) for c, b1, b1d in zip(c_samples, b1_samples, b1d_samples)])
         
@@ -173,22 +184,23 @@ def plot_link_spline(x, idata, stat_name, B, knots, var_names=['zi_b0', 'zi_b1']
     x_mean = np.mean(x)
     x_std_dev = np.std(x)
     
-    if np.all([v in idata.posterior for v in var_names]):
-        b0_samples = idata.posterior[var_names[0]].values.flatten()
-        b1_samples = idata.posterior[var_names[1]].values.flatten()
+    idata_posterior = idata.posterior
+    if np.all([v in idata_posterior for v in var_names]):
+        b0_samples = idata_posterior[var_names[0]].values.flatten()
+        b1_samples = idata_posterior[var_names[1]].values.flatten()
 
         x0_samples = -b0_samples / (b1_samples) * x_std_dev + x_mean
         link_samples = np.array([b0 + b1 * ((x - x_mean) / x_std_dev) for b0, b1 in zip(b0_samples, b1_samples)])
-    elif all(v in idata.posterior for v in ['zi_c', 'zi_b01', 'zi_b11']):
-        c_samples = idata.posterior['zi_c'].values.flatten()
-        b01_samples = idata.posterior['zi_b01'].values.flatten()
-        b11_samples = idata.posterior['zi_b11'].values.flatten()
+    elif all(v in idata_posterior for v in ['zi_c', 'zi_b01', 'zi_b11']):
+        c_samples = idata_posterior['zi_c'].values.flatten()
+        b01_samples = idata_posterior['zi_b01'].values.flatten()
+        b11_samples = idata_posterior['zi_b11'].values.flatten()
         x0_samples = c_samples.copy() * x_std_dev + x_mean
         link_samples = np.array([np.maximum(0, ((x - x_mean) / x_std_dev) - c) * (b01 - b11) + b11 * (((x - x_mean) / x_std_dev) - c) for c, b01, b11 in zip(c_samples, b01_samples, b11_samples)])
-    elif all(v in idata.posterior for v in ['zi_c', 'zi_b1', 'zi_b1d']):
-        c_samples = idata.posterior['zi_c'].values.flatten()
-        b1_samples = idata.posterior['zi_b1'].values.flatten()
-        b1d_samples = idata.posterior['zi_b1d'].values.flatten()
+    elif all(v in idata_posterior for v in ['zi_c', 'zi_b1', 'zi_b1d']):
+        c_samples = idata_posterior['zi_c'].values.flatten()
+        b1_samples = idata_posterior['zi_b1'].values.flatten()
+        b1d_samples = idata_posterior['zi_b1d'].values.flatten()
         x0_samples = c_samples.copy() * x_std_dev + x_mean
         link_samples = np.array([np.maximum(0, ((x - x_mean) / x_std_dev) - c) * b1d + b1 * (((x - x_mean) / x_std_dev) - c) for c, b1, b1d in zip(c_samples, b1_samples, b1d_samples)])
         
@@ -212,8 +224,8 @@ def plot_link_spline(x, idata, stat_name, B, knots, var_names=['zi_b0', 'zi_b1']
     B_plot = B_local[id]
     
     # Extract posterior samples
-    w_samples = idata.posterior[f'w({stat_name})'].stack(draws=("chain", "draw")).values  # (n_basis, n_draws)
-    # sigma_w_samples = idata.posterior[f'sigma_w({stat_name})'].stack(draws=("chain", "draw")).values  # (n_draws,)
+    w_samples = idata_posterior[f'w({stat_name})'].stack(draws=("chain", "draw")).values  # (n_basis, n_draws)
+    # sigma_w_samples = idata_posterior[f'sigma_w({stat_name})'].stack(draws=("chain", "draw")).values  # (n_draws,)
 
     f_samples = (B_plot @ w_samples)
     s_samples = np.exp(f_samples)
@@ -221,12 +233,10 @@ def plot_link_spline(x, idata, stat_name, B, knots, var_names=['zi_b0', 'zi_b1']
     link_samples = link_samples * s_samples.T
 
     link_mean = link_samples.mean(axis=0)
-    link_lower5 = np.percentile(link_samples, 25, axis=0)
-    link_upper5 = np.percentile(link_samples, 75, axis=0)
+    # link_lower5 = np.percentile(link_samples, 25, axis=0)
+    # link_upper5 = np.percentile(link_samples, 75, axis=0)
     link_lower = np.percentile(link_samples, 2.5, axis=0)
     link_upper = np.percentile(link_samples, 97.5, axis=0)
-
-    
 
     link_hdi = np.array([link_lower, link_upper]).T
     plt.figure(figsize=(8, 5))
@@ -258,7 +268,7 @@ def plot_exp_spline_(x, idata, stat_name, B, knots):
     ###
     knots_local = np.array(knots, copy=True)
     B_local = np.array(B, copy=True, order="F")
-    data_local = np.array(x, copy=True)
+    # data_local = np.array(x, copy=True)
     B_plot = B_local[id]
     
     # Extract posterior samples
@@ -271,8 +281,8 @@ def plot_exp_spline_(x, idata, stat_name, B, knots):
     link_samples = s_samples.T
 
     link_mean = link_samples.mean(axis=0)
-    link_lower5 = np.percentile(link_samples, 25, axis=0)
-    link_upper5 = np.percentile(link_samples, 75, axis=0)
+    # link_lower5 = np.percentile(link_samples, 25, axis=0)
+    # link_upper5 = np.percentile(link_samples, 75, axis=0)
     link_lower = np.percentile(link_samples, 2.5, axis=0)
     link_upper = np.percentile(link_samples, 97.5, axis=0)
 
@@ -819,17 +829,18 @@ def build_var_names(alpha_parameters, intercept_parameters, link, link_type,
     if stat_names is not None:
         if spline_implementation == 'svd':
             for stat_name in stat_names:
-                var_names.append(f'sigma_w({stat_name})')
+                # var_names.append(f'sigma_w({stat_name})')
                 var_names.append(f'w({stat_name})')
             if penalty_order is not None:
                 for stat_name in stat_names:
                     # var_names.append(f'p_({stat_name})')
-                    var_names.append(f'p({stat_name})')
-                    var_names.append(f'pot({stat_name})')
-                    var_names.append(f'pot_unit({stat_name})')
-                    var_names.append(f'smoothness({stat_name})')
-                    var_names.append(f'full_smoothness({stat_name})')
-                    var_names.append(f'alt_smoothness({stat_name})')
+                    # var_names.append(f'p({stat_name})')
+                    var_names.append(f"pen({stat_name})")
+                    # var_names.append(f'pot({stat_name})')
+                    # var_names.append(f'pot_unit({stat_name})')
+                    # var_names.append(f'smoothness({stat_name})')
+                    # var_names.append(f'full_smoothness({stat_name})')
+                    # var_names.append(f'alt_smoothness({stat_name})')
         elif spline_implementation == 'rw2':
             for stat_name in stat_names:
                 var_names.append(f'w({stat_name})')
@@ -1211,8 +1222,7 @@ def build_sig_spline_p_model(data,
                              cutoff, 
                              exclude=None,
                              surveillance_name=None,
-                             urbanisation_name='urbanisation_pop_weighted_std',
-                             boundary_penalty=1.0):
+                             urbanisation_name='urbanisation_pop_weighted_std'):
 
     m = build_model_name(alpha_type, alpha_parameters,
                         intercept_type, intercept_parameters,
@@ -1315,7 +1325,6 @@ def build_sig_spline_p_model(data,
                             smoothness = pm.Deterministic(f"smoothness({stat_name})", 1/h**3*(2/3*pt.dot(DVw, DVw)))
                             full_smoothness = pm.Deterministic(f"full_smoothness({stat_name})",
                                                                1/h**3*(2/3*pt.dot(DVw, DVw) + 1/6*pt.dot(DVw1, DVw2)))
-                        if boundary_penalty is not None:
 
         # Link
         log_mu = intercept + pm.math.log(data['population'])
@@ -1360,6 +1369,144 @@ def build_sig_spline_p_model(data,
     
     return model, m, B, knot_list
 
+def build_model_equispaced_exact(data,
+                             alpha_type, alpha_parameters,
+                             intercept_type, intercept_parameters,
+                             beta_u_type, beta_u_parameters,
+                             link, link_stat_name, link_type,
+                             b1_type, b1_parameters,
+                             c_type, c_parameters,
+                             stat_names, num_knots, knot_type, degree,
+                             spline_implementation, spline_type, spline_parameters,
+                             penalty_order, penalty_type, penalty_parameters, penalty_std,
+                             cutoff, 
+                             exclude=None,
+                             surveillance_name=None,
+                             urbanisation_name='urbanisation_pop_weighted_std'):
+
+    m = build_model_name(alpha_type, alpha_parameters,
+                        intercept_type, intercept_parameters,
+                        link, link_stat_name, link_type,
+                        b1_type, b1_parameters,
+                        c_type, c_parameters,
+                        stat_names, num_knots, knot_type, degree,
+                        spline_implementation, spline_type, spline_parameters,
+                        penalty_order, penalty_type, penalty_parameters, penalty_std,
+                        cutoff, beta_u_type, beta_u_parameters,
+                        exclude=exclude)
+
+    model = pm.Model()
+    with model:
+        # Priors
+        if alpha_type == 'exponential':
+            alpha = pm.Exponential("alpha", lam=alpha_parameters['lam'])
+        elif alpha_type == 'gamma':
+            alpha = pm.Gamma("alpha", alpha=alpha_parameters['a'], beta=alpha_parameters['b'])
+        if intercept_type == 'normal':
+            intercept = pm.Normal("intercept", mu=intercept_parameters['mu'], sigma=intercept_parameters['sigma'])
+        if urbanisation_name is not None:
+            beta_u = pm.Normal("beta_u", mu=beta_u_parameters['mu'], sigma=beta_u_parameters['sigma'])
+        
+        # splines
+        B = None
+        knot_list = None
+        if stat_names is not None:
+            knot_list = {}
+            B = {}
+            sigma_w = {}
+            w = {}
+            f = {}
+            for stat_name in stat_names:
+                d = data[stat_name].values
+                # d = np.clip(d, np.percentile(d, 0.1), np.percentile(d, 99.9))
+
+                B_full, _, _, knot_list[stat_name] = eval_spline_basis_equispaced_numeric(degree, np.min(d), np.max(d), num_knots, d).values()
+
+                if spline_implementation == 'svd':
+                    B_full_centred = B_full - B_full.mean(axis=0)  # centre the spline basis functions
+                    U, S, Vt = np.linalg.svd(B_full_centred, full_matrices=False)
+                    k = len(S)
+                    r = np.sum(S > 1e-10)
+                    U_r = U[:, :r]
+                    S_r = S[:r]
+                    Vt_r = Vt[:r, :]
+                    V_r = np.ascontiguousarray(Vt_r.T)
+                    X_r = U_r @ np.diag(S_r)
+                    X_r = np.ascontiguousarray(X_r)  # ensure X_r is C-contiguous for PyMC
+                    B[stat_name] = X_r
+
+                    # Spline coefficients
+                    if spline_type == 'halfnormal':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfNormal(f"sigma_w({stat_name})", sigma=spline_parameters['sigma_w_sigma'])
+                    elif spline_type == 'halfstudentt':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfStudentT(f"sigma_w({stat_name})", nu=spline_parameters['sigma_w_nu'], sigma=spline_parameters['sigma_w_sigma'])
+                    w[stat_name] = pm.Normal(f"w({stat_name})", mu=0, sigma=sigma_w[stat_name], size=B[stat_name].shape[1], dims="splines")
+                    # ws0 = B[stat_name].shape[1]
+                    # w_ = pm.Normal(f"w_({stat_name})", mu=0, sigma=1.0, size=B[stat_name].shape[1], dims="splines")
+                    # w[stat_name] = pm.Deterministic(f"w({stat_name})", w_ * sigma_w[stat_name])
+
+                    f[stat_name] = pm.math.dot(B[stat_name], w[stat_name])
+
+                    if penalty_order is not None:
+                        if penalty_type == 'halfnormal':
+                            h = (np.max(d) - np.min(d)) / (num_knots + 1)
+                            #p_ = pm.HalfNormal(f"p_({stat_name})", sigma=1.0)
+                            #p = pm.Deterministic(f'p({stat_name})', p_ * penalty_parameters['sigma'])
+                            p = pm.Deterministic(f'p({stat_name})', pt.as_tensor_variable(penalty_parameters['p']))
+
+                        #D = difference_matrix(k, order=penalty_order)
+                        #DV = D @ Vt_r.T
+                        #DV = np.ascontiguousarray(DV)
+                        #DV = pt.as_tensor_variable(DV)
+                        
+                        if penalty_std:
+                            raise ValueError("penalty_std=True is not allowed")
+                        else:
+                            D2 = difference_matrix(k, order=2)        # (k-2, k)
+                            #print(D2)
+                            D2V = np.ascontiguousarray(D2 @ V_r)        # (k-2, k)(k, r) = (k-2, r)
+                            D2V_pt = pt.as_tensor_variable(D2V)
+                            D2Vw = pt.dot(D2V_pt, w[stat_name])
+                            int_f_dd_sq = (1 / (3 * h**3)) * (
+                                            D2Vw[0]**2
+                                            + 2 * pt.sum(D2Vw[1:-1]**2)
+                                            + D2Vw[-1]**2
+                                            + pt.sum(D2Vw[:-1] * D2Vw[1:])
+                                        )
+                            # Vw = Vt_r.T @ w[stat_name]
+                            # d2Vw = Vw[2:] - 2*Vw[1:-1] + Vw[:-2]
+                            # int_f_dd_sq = (1/(3*h**3))*(d2Vw[0]**2 + 2*pt.sum(d2Vw[1:-1]**2) + d2Vw[-1]**2 + pt.sum(d2Vw[0:-1]*d2Vw[1:]))
+                            # int_d2f2 = 1/h**3*(2/3*pt.dot(DVw, DVw) + 1/6*pt.dot(DVw1, DVw2))
+                            pm.Potential(f"spline_penalty({stat_name})", (-pt.log(p) -1/2*int_f_dd_sq/p**2) * r)
+                            pen = pm.Deterministic(f"pen({stat_name})", (-pt.log(p) -1/2*int_f_dd_sq/p**2))
+                            # pot = pm.Deterministic(f"pot({stat_name})", (-pt.log(p) -1/2*int_d2f2/p**2) * r)
+                            # pot_unit = pm.Deterministic(f"pot_unit({stat_name})", pot/r)
+                            # smoothness = pm.Deterministic(f"smoothness({stat_name})", 1/h**3*(2/3*pt.dot(DVw, DVw)))
+                            #full_smoothness = pm.Deterministic(f"full_smoothness({stat_name})",
+                                                               # 1/h**3*(2/3*pt.dot(DVw, DVw) + 1/6*pt.dot(DVw1, DVw2)))
+
+        # Link
+        log_mu = intercept + pm.math.log(data['population'])
+        surveillance_name = None
+        if surveillance_name is not None:
+            log_mu += pm.math.log(pm.math.max(data[surveillance_name], pm.math.log(1e-3)))
+        if urbanisation_name is not None:
+            log_mu += beta_u*data[urbanisation_name]
+        if stat_names is not None:
+            for stat_name in stat_names:
+                log_mu += f[stat_name]
+
+        # Zero-inflation component
+        if link is None:
+            y_obs = pm.NegativeBinomial('y_obs', mu=pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
+        else:
+            raise ValueError("link is not allowed for this model")
+
+    m = m[:200]
+    
+    return model, m, B, knot_list
 
 def fit_sig_spline_p_model(data, data_name,
                            model_settings,
@@ -1376,6 +1523,9 @@ def fit_sig_spline_p_model(data, data_name,
     if model_builder == 'build_sig_spline_p_model':
         model, m, B, knot_list = build_sig_spline_p_model(data.copy(), **model_settings)
         model_name = m
+    if model_builder == 'build_model_equispaced_exact':
+        model, m, B, knot_list = build_model_equispaced_exact(data.copy(), **model_settings)
+        model_name = m  
     var_names = build_var_names(model_settings['alpha_parameters'], model_settings['intercept_parameters'], model_settings['link'], model_settings['link_type'],
                                     model_settings['b1_parameters'], model_settings['c_parameters'], model_settings['stat_names'], model_settings['spline_implementation'],
                                     model_settings['penalty_order'], model_settings['penalty_parameters'], model_settings['beta_u_parameters'])
@@ -1408,10 +1558,11 @@ def fit_sig_spline_p_model(data, data_name,
             if "log_likelihood" not in idata.groups():
                 print(f"Log likelihood missing, recomputing...")
                 pm.compute_log_likelihood(idata, progressbar=False)
-                tmp_file = os.path.join(idata_path, f"temp_idata_[{model_name}].nc")
-                idata_thinned = idata.sel(draw=slice(None, None, 12))
-                idata_thinned.to_netcdf(tmp_file)
-                os.replace(tmp_file, idata_file)  # atomic replace
+                # tmp_file = os.path.join(idata_path, f"temp_idata_[{model_name}].nc")
+                # idata_thinned = idata.sel(draw=slice(None, None, 12))
+                # idata_thinned.to_netcdf(tmp_file)
+                # os.replace(tmp_file, idata_file)  # atomic replace
+                idata.to_netcdf(idata_file)
                 print('saved idata to', idata_file)
                 times = (0.0, 0.0)
             else:
@@ -1434,8 +1585,8 @@ def fit_sig_spline_p_model(data, data_name,
                 store_divergences=True,
                 nuts_sampler="nutpie",
                 target_accept = target_accept,
-                max_treedepth = max_treedepth,
-                nuts_sampler_kwargs={"max_energy_error": max_energy_error},
+                max_treedepth = max_treedepth, # comment out below when using CPU
+                nuts_sampler_kwargs={"max_energy_error": max_energy_error, 'backend': 'jax', 'gradient_backend': 'jax'},
                 progressbar=True
             )
             s1 = time.time()
@@ -1449,7 +1600,7 @@ def fit_sig_spline_p_model(data, data_name,
             with open(os.path.join(output_path, "times.txt"), "w") as f:
                 f.write(f"{times[0]}\n{times[1]}\n")
             # Save inference data
-            idata_thinned = idata.sel(draw=slice(None, None, 12))
+            idata_thinned = idata.sel(draw=slice(None, None, 8))
             idata_thinned.to_netcdf(idata_file)
             print('saved idata to', idata_file)
             print(f'\nPosterior Sampling {s1 - s0:.2f} seconds')
@@ -1482,16 +1633,36 @@ def fit_sig_spline_p_model(data, data_name,
     #### WAIC and PSIS LOO
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        eval_waic = az.waic(idata)
-        eval_psis_loo_elpd = az.loo(idata)
+        eval_waic = az.waic(idata, pointwise=True)
+        eval_psis_loo_elpd = az.loo(idata, pointwise=True)
 
     # Save pointwise values for later comparison
     pointwise_file = os.path.join(metrics_path, f"_metrics[{model_name}].npz")
+    #np.savez(
+        #pointwise_file,
+        #waic_pointwise=eval_waic.waic_i.values,
+        #loo_pointwise=eval_psis_loo_elpd.loo_i.values,
+        #pareto_k=eval_psis_loo_elpd.pareto_k.values
+    #)
+    mtime = time.time()
     np.savez(
         pointwise_file,
-        waic_pointwise=eval_waic.waic_i.values,
+        loo_elpd_loo = eval_psis_loo_elpd.elpd_loo,
+        loo_se = eval_psis_loo_elpd.se,
+        loo_p_loo = eval_psis_loo_elpd.p_loo,
+        loo_n_samples = eval_psis_loo_elpd.n_samples,
+        loo_n_data_points = eval_psis_loo_elpd.n_data_points,
+        loo_warning = eval_psis_loo_elpd.warning,
+
         loo_pointwise=eval_psis_loo_elpd.loo_i.values,
-        pareto_k=eval_psis_loo_elpd.pareto_k.values
+        pareto_k=eval_psis_loo_elpd.pareto_k.values,
+
+        waic_elpd_waic = eval_waic.elpd_waic,
+        waic_se = eval_waic.se,
+        waic_p_waic = eval_waic.p_waic,
+        waic_warning = eval_waic.warning,
+
+        waic_pointwise=eval_waic.waic_i.values,
     )
 
     # dataframes (inner and outer)
@@ -1509,13 +1680,13 @@ def fit_sig_spline_p_model(data, data_name,
     # khat_fig.savefig(fig_file, bbox_inches="tight")
     plt.close(khat_fig)
     ####
-
+    idata_posterior = idata.posterior
     # ---------- Summary table ----------
     if show['summary']:
         filtered = []
         for v in var_names:
-            if v in idata.posterior:
-                vals = idata.posterior[v].values
+            if v in idata_posterior:
+                vals = idata_posterior[v].values
                 if np.std(vals) > 0:
                     filtered.append(v)
         summary_df = az.summary(idata, var_names=filtered)
@@ -1561,10 +1732,10 @@ def fit_sig_spline_p_model(data, data_name,
 
     # ---------- WAIC and PSIS LOO ----------
     if show['metrics']:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            eval_waic = az.waic(idata)
-            eval_psis_loo_elpd = az.loo(idata)
+        # with warnings.catch_warnings():
+            # warnings.simplefilter("ignore")
+             #eval_waic = az.waic(idata)
+            # eval_psis_loo_elpd = az.loo(idata)
         wl_df = pd.DataFrame([elpd_to_row(eval_waic, eval_psis_loo_elpd, m, 'd')])
         wl_html = wl_df.to_html()
     else:
@@ -1636,7 +1807,7 @@ def fit_sig_spline_p_model(data, data_name,
         
     #--- Divergences plot ---
     if show['divergences']&(n_divergences > 0):
-        posterior = idata.posterior.to_dataframe().reset_index()
+        posterior = idata_posterior.to_dataframe().reset_index()
         stats = idata.sample_stats.to_dataframe().reset_index()
         df = posterior.merge(stats, on=["chain","draw"])
         sns.pairplot( df, vars=var_names, hue="diverging",
