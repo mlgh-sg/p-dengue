@@ -2,6 +2,32 @@ import numpy as np
 import sympy as sp
 
 
+def difference_matrix(n, order=1):
+    """
+    Construct a kth-order finite difference matrix of size (n - order, n).
+
+    Parameters
+    ----------
+    n : int
+        Length of the coefficient vector.
+    order : int
+        Order of the difference.
+
+    Returns
+    -------
+    D : ndarray
+        Difference matrix of shape (n - order, n)
+    """
+    if order < 1:
+        raise ValueError("order must be >= 1")
+    if order >= n:
+        raise ValueError("order must be < n")
+
+    D = np.eye(n)
+    for _ in range(order):
+        D = np.diff(D, axis=0)
+    return D
+
 def bspline_basis_full_knots_numeric(full_knots, degree, x, simplify=False):
     """
     Returns list of basis functions for all degrees up to `degree`. Works with symbolic or numeric knots.

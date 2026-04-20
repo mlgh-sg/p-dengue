@@ -19,54 +19,13 @@ import time
 import warnings
 from _fitting.fitting_utils import hist_plot, CI_plot, CI_plot_alt, CI_plot_both, plot_posteriors_side_by_side, plot_spline1, plot_spline_Bknots
 from glob import glob
-
-###
 import base64
+
 ###
-def abbrev_surveillance(name):
-    if name is None:
-        return "nosurv"
-    base = "surv"
-    if "urban" in name:
-        base = "urb_surv"
-    weight = "p" if "pop_weighted" in name else "u"
-    return f"{base}_{weight}"
-
-def abbrev_urbanisation(name):
-    if name is None:
-        return "nourb"
-    base = "urb"
-    weight = "p" if "pop_weighted" in name else "u"
-    std = "_std" if "std" in name else ""
-    return f"{base}_{weight}{std}"
-
-def abbrev_stat(stat):
-    # remove spaces
-    s = stat.replace(" ", "")
-    
-    # lag extraction: "(k)"
-    lag = re.search(r"\((\d+)\)", s)
-    lag_str = f"({lag.group(1)})" if lag else ""
-    
-    # check if _log is present
-    has_log = "_log" in s
-    
-    # weighting
-    if "pop_weighted" in s:
-        w = "p"
-    elif "unweighted" in s:
-        w = "u"
-    else:
-        w = ""
-    
-    # remove weighting and lag, keep everything else
-    base = re.sub(r"_?(pop_weighted|unweighted).*", "", s)
-    
-    # reattach _log if it was in original
-    if has_log and not base.endswith("_log"):
-        base += "_log"
-    
-    return f"{base}_{w}{lag_str}"
+from _fitting._utils_naming import abbrev_surveillance, abbrev_urbanisation, abbrev_stat
+from _fitting._utils_style import color_switch, color_rhat, color_ess
+from _fitting.fitting_utils import path_setup
+###
 
 def model_settings_to_name(settings):
     surv = abbrev_surveillance(settings.get("surveillance_name"))
@@ -125,27 +84,13 @@ def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
         "pareto_k_mean": float(eval_loo.pareto_k.mean()),
     }
 ###
+
 def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500, n_tune=500, sampler="nutpie", invert_log=False, task=None, check_report=True, check_idata=True, clear_idata=False):
-    
-    if task is None:
-        data_path = os.path.join(outpath, f'{data_name}/')
-    else:
-        data_path = os.path.join(outpath, f'{data_name}[{task}]/')
-    os.makedirs(data_path, exist_ok=True)
     
     model_name = model_settings_to_name(model_settings)
 
-    idata_path = os.path.join(data_path, 'idata')
-    os.makedirs(idata_path, exist_ok=True)
-
-    report_path = os.path.join(data_path, f'reports/')
-    os.makedirs(report_path, exist_ok=True)
-
-    metrics_path = os.path.join(data_path, f'metrics')
-    os.makedirs(metrics_path, exist_ok=True)
-
-    output_path = os.path.join(data_path, f'outputs/{model_name}')
-    os.makedirs(output_path, exist_ok=True)
+    # path setup
+    data_path, idata_path, report_path, metrics_path, output_path = path_setup(outpath, data_name, task, model_name)
 
     # if report already exists, skip
     idata_file = os.path.join(idata_path, f"idata_[{model_name}].nc")
@@ -275,16 +220,6 @@ def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500,
         os.remove(idata_file)
     return
 
-def ess_style(x, n_draws):
-    if isinstance(x, (int, float)):
-        if x < n_draws / 5:
-            return "background-color: red;"
-        elif x < n_draws / 4:
-            return "background-color: yellow;"
-        else:
-            return "background-color: lightgreen;"
-    return ""
-
 def create_html_report(model_folder, model_name, n_draws, reports_folder=None, title=None, replace=False, clear_images=False):
     """
     Generate HTML report for a single model.
@@ -331,7 +266,7 @@ def create_html_report(model_folder, model_name, n_draws, reports_folder=None, t
                 df_html = (df.style.format(fmt_dict)
                     .map(lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1.01 else "background-color: lightgreen;",
                          subset=["r_hat"] if "r_hat" in df.columns else [])
-                    .map(lambda x: ess_style(x, n_draws),
+                    .map(lambda x: color_ess(x, n_draws),
                          subset=["ess_bulk", "ess_tail"] if "ess_bulk" in df.columns else [])
                     ).to_html()
             elif tfile == "_model_elpd_metrics.csv":
@@ -406,21 +341,12 @@ def model_fit_Bdropcentred(data, data_name,
                            pars_in_name=[], basis_scale=1,
                            model_builder='choose_Bdropcentred'):
     
-    data_path = os.path.join(outpath, f'{data_name}[{task}]/')
-    os.makedirs(data_path, exist_ok=True)
-
     model_name = model_settings_to_name(model_settings)
     for par in pars_in_name:
         model_name += f"_{par}_{model_settings[par]}"
-    
-    idata_path = os.path.join(data_path, 'idata')
-    os.makedirs(idata_path, exist_ok=True)
-    report_path = os.path.join(data_path, f'reports/')
-    os.makedirs(report_path, exist_ok=True)
-    metrics_path = os.path.join(data_path, f'metrics')
-    os.makedirs(metrics_path, exist_ok=True)
-    output_path = os.path.join(data_path, f'outputs/{model_name}')
-    os.makedirs(output_path, exist_ok=True)
+
+    # path setup
+    data_path, idata_path, report_path, metrics_path, output_path = path_setup(outpath, data_name, task, model_name)
 
     # if report already exists, skip
     idata_file = os.path.join(idata_path, f"idata_[{model_name}].nc")
@@ -551,16 +477,6 @@ def model_fit_Bdropcentred(data, data_name,
         os.remove(idata_file)
     return
 
-def ess_style(x, n_draws):
-    if isinstance(x, (int, float)):
-        if x < n_draws / 5:
-            return "background-color: red;"
-        elif x < n_draws / 4:
-            return "background-color: yellow;"
-        else:
-            return "background-color: lightgreen;"
-    return ""
-
 def create_html_report(model_folder, model_name, n_draws, reports_folder=None, title=None, replace=False, clear_images=False):
     """
     Generate HTML report for a single model.
@@ -607,7 +523,7 @@ def create_html_report(model_folder, model_name, n_draws, reports_folder=None, t
                 df_html = (df.style.format(fmt_dict)
                     .map(lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1.01 else "background-color: lightgreen;",
                          subset=["r_hat"] if "r_hat" in df.columns else [])
-                    .map(lambda x: ess_style(x, n_draws),
+                    .map(lambda x: color_ess(x, n_draws),
                          subset=["ess_bulk", "ess_tail"] if "ess_bulk" in df.columns else [])
                     ).to_html()
             elif tfile == "_model_elpd_metrics.csv":

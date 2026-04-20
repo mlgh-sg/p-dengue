@@ -7,35 +7,31 @@ import numpy as np
 import matplotlib.pyplot as plt
 import arviz as az
 from patsy import dmatrix
-import re
 
-def abbrev_stat(stat):
-    # remove spaces
-    s = stat.replace(" ", "")
-    
-    # lag extraction: "(k)"
-    lag = re.search(r"\((\d+)\)", s)
-    lag_str = f"({lag.group(1)})" if lag else ""
-    
-    # check if _log is present
-    has_log = "_log" in s
-    
-    # weighting
-    if "pop_weighted" in s:
-        w = "p"
-    elif "unweighted" in s:
-        w = "u"
+###
+from _fitting._utils_naming import abbrev_surveillance, abbrev_urbanisation, abbrev_stat
+###
+def path_setup(outpath, data_name, task, model_name):
+    if task is None:
+        data_path = os.path.join(outpath, f'{data_name}/')
     else:
-        w = ""
-    
-    # remove weighting and lag, keep everything else
-    base = re.sub(r"_?(pop_weighted|unweighted).*", "", s)
-    
-    # reattach _log if it was in original
-    if has_log and not base.endswith("_log"):
-        base += "_log"
-    
-    return f"{base}_{w}{lag_str}"
+        data_path = os.path.join(outpath, f'{data_name}[{task}]/')
+    os.makedirs(data_path, exist_ok=True)
+
+    idata_path = os.path.join(data_path, 'idata')
+    os.makedirs(idata_path, exist_ok=True)
+
+    report_path = os.path.join(data_path, f'reports/')
+    os.makedirs(report_path, exist_ok=True)
+
+    metrics_path = os.path.join(data_path, f'metrics')
+    os.makedirs(metrics_path, exist_ok=True)
+
+    output_path = os.path.join(data_path, f'outputs/{model_name}')
+    os.makedirs(output_path, exist_ok=True)
+
+    return data_path, idata_path, report_path, metrics_path, output_path
+###
 
 def hist_plot(idata, figsize=(9,5), root=True):
     # comparing observed and predicted histograms

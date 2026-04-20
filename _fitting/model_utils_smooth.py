@@ -34,72 +34,15 @@ warnings.filterwarnings("ignore", module="arviz")
 import seaborn as sns
 from scipy.special import erf
 from multiprocessing import Pool
-from _fitting.spline_utils import *
+from _fitting._utils_spline import *
 
 ###
-
-def color_rhat(val):
-    '''Styling for summary dataframe: Color code for R-hat values: green if <1.01, red otherwise.'''
-    try:
-        v = float(val)
-        if v < 1.01:
-            color = "background-color: #c6efce"  # green
-        else:
-            color = "background-color: #ffc7ce"  # red
-    except:
-        color = ""
-    return color
-
-
-def abbrev_surveillance(name):
-    '''Abbreviate surveillance type and weighting from name.'''
-    if name is None:
-        return "nosurv"
-    base = "surv"
-    if "urban" in name:
-        base = "urb_surv"
-    weight = "p" if "pop_weighted" in name else "u"
-    return f"{base}_{weight}"
-
-def abbrev_urbanisation(name):
-    '''Abbreviate urbanisation type and weighting from name.'''
-    if name is None:
-        return "nourb"
-    base = "urb"
-    weight = "p" if "pop_weighted" in name else "u"
-    std = "_std" if "std" in name else ""
-    return f"{base}_{weight}{std}"
-
-def abbrev_stat(stat):
-    '''Abbreviate statistic name.'''
-    # remove spaces
-    s = stat.replace(" ", "")
-    
-    # lag extraction: "(k)"
-    lag = re.search(r"\((\d+)\)", s)
-    lag_str = f"({lag.group(1)})" if lag else ""
-    
-    # check if _log is present
-    has_log = ("_log" in s)
-    
-    # weighting
-    if "pop_weighted" in s:
-        w = "p"
-    elif "unweighted" in s:
-        w = "u"
-    else:
-        w = ""
-    
-    # remove weighting and lag, keep everything else
-    base = re.sub(r"_?(pop_weighted|unweighted).*", "", s)
-    
-    # reattach _log if it was in original
-    if has_log and not base.endswith("_log"):
-        base += "_log"
-    
-    return f"{base}_{w}{lag_str}"
-
+from _fitting._utils_naming import abbrev_surveillance, abbrev_urbanisation, abbrev_stat
+from _fitting._utils_spline import difference_matrix
+from _fitting._utils_style import color_switch, color_rhat, color_ess
+from _fitting.fitting_utils import path_setup
 ###
+
 
 def model_settings_to_name(settings):
     surv = abbrev_surveillance(settings.get("surveillance_name"))
@@ -395,34 +338,6 @@ def plot_exp_spline(x, idata, stat_name, B, knots, data=None, freq_transform=lam
 
 units = {'t2':'C˚', 'rh':'%RH', 'tp':'mm'}
 units_log = {'t2':'C˚', 'rh':'%RH', 'tp':'log(m)'}
-
-def abbrev_stat(stat):
-    # remove spaces
-    s = stat.replace(" ", "")
-    
-    # lag extraction: "(k)"
-    lag = re.search(r"\((\d+)\)", s)
-    lag_str = f"({lag.group(1)})" if lag else ""
-    
-    # check if _log is present
-    has_log = "_log" in s
-    
-    # weighting
-    if "pop_weighted" in s:
-        w = "p"
-    elif "unweighted" in s:
-        w = "u"
-    else:
-        w = ""
-    
-    # remove weighting and lag, keep everything else
-    base = re.sub(r"_?(pop_weighted|unweighted).*", "", s)
-    
-    # reattach _log if it was in original
-    if has_log and not base.endswith("_log"):
-        base += "_log"
-
-    return f"{base}_{w}{lag_str}"
 
 def plot_spline_Bknots(idata, stat_name,
                        var, sigma_var, B, data, knots,
@@ -767,32 +682,6 @@ def go(data, m, model_dict, idata_dict, time_dict, B_dict,
     print(f"Saved report to {m}.html")
     
     return model_dict[m], B_dict[m], knot_list_dict[m], stat_names_dict[m], var_names_dict[m], link_dict[m], idata_dict[m], time_dict[m], n_divergences_dict[m]
-
-def difference_matrix(n, order=1):
-    """
-    Construct a kth-order finite difference matrix of size (n-order, n).
-
-    Parameters
-    ----------
-    n : int
-        Length of the coefficient vector.
-    order : int
-        Order of the difference.
-
-    Returns
-    -------
-    D : ndarray
-        Difference matrix of shape (n-order, n)
-    """
-    if order < 1:
-        raise ValueError("order must be >= 1")
-    if order >= n:
-        raise ValueError("order must be < n")
-
-    D = np.eye(n)
-    for _ in range(order):
-        D = np.diff(D, axis=0)
-    return D
 
 def time_models(model_dict, idata_dict, models_list, iter):
     # Compare models
@@ -1756,17 +1645,8 @@ def fit_sig_spline_p_model(data, data_name,
                                     model_settings['b1_parameters'], model_settings['c_parameters'], model_settings['stat_names'], model_settings['spline_implementation'],
                                     model_settings['penalty_order'], model_settings['penalty_parameters'], model_settings['beta_u_parameters'])
 
-    data_path = os.path.join(outpath, f'{data_name}[{task}]/')
-    os.makedirs(data_path, exist_ok=True)
-    
-    idata_path = os.path.join(data_path, 'idata')
-    os.makedirs(idata_path, exist_ok=True)
-    report_path = os.path.join(data_path, f'reports/')
-    os.makedirs(report_path, exist_ok=True)
-    metrics_path = os.path.join(data_path, f'metrics')
-    os.makedirs(metrics_path, exist_ok=True)
-    output_path = os.path.join(data_path, f'outputs/{model_name}')
-    os.makedirs(output_path, exist_ok=True)
+    # path setup
+    data_path, idata_path, report_path, metrics_path, output_path = path_setup(outpath, data_name, task, model_name)
 
     # if report already exists, skip
     idata_file = os.path.join(idata_path, f"idata_[{model_name}].nc")
@@ -2290,16 +2170,6 @@ def go_report(report_path, m, idata, n_divergences, times, show, summary_html, f
 
     print(f"Saved report to {report_file}")
 
-def ess_style(x, n_draws):
-    if isinstance(x, (int, float)):
-        if x < n_draws / 5:
-            return "background-color: red;"
-        elif x < n_draws / 4:
-            return "background-color: yellow;"
-        else:
-            return "background-color: lightgreen;"
-    return ""
-
 def create_html_report(model_folder, model_name, n_draws, reports_folder=None, title=None, replace=False, clear_images=False):
     """
     Generate HTML report for a single model.
@@ -2346,7 +2216,7 @@ def create_html_report(model_folder, model_name, n_draws, reports_folder=None, t
                 df_html = (df.style.format(fmt_dict)
                     .map(lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1.01 else "background-color: lightgreen;",
                          subset=["r_hat"] if "r_hat" in df.columns else [])
-                    .map(lambda x: ess_style(x, n_draws),
+                    .map(lambda x: color_ess(x, n_draws),
                          subset=["ess_bulk", "ess_tail"] if "ess_bulk" in df.columns else [])
                     ).to_html()
             elif tfile == "_model_elpd_metrics.csv":
