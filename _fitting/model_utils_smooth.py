@@ -1,6 +1,9 @@
+# Imports and CPU / GPU setup
+
 # if using conda env for jax GPU
 import subprocess, os; os.environ["CUDA_VISIBLE_DEVICES"] = str(max([(int(l.split(',')[0]), int(l.split(',')[1])) for l in subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,nounits,noheader'], capture_output=True, text=True).stdout.strip().split('\n')], key=lambda x: x[1])[0])
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -20,10 +23,9 @@ import xarray as xr
 
 # if using uv env for CPU
 # import pytensor
- #pytensor.config.mode='NUMBA'
+# pytensor.config.mode='NUMBA'
 
 import pytensor.tensor as pt
-from pytensor.gradient import disconnected_grad
 from scipy.sparse.linalg import eigsh
 az.style.use("arviz-darkgrid")
 import warnings
@@ -34,19 +36,23 @@ from scipy.special import erf
 from multiprocessing import Pool
 from _fitting.spline_utils import *
 
+###
 
 def color_rhat(val):
-            try:
-                v = float(val)
-                if v < 1.01:
-                    color = "background-color: #c6efce"  # green
-                else:
-                    color = "background-color: #ffc7ce"  # red
-            except:
-                color = ""
-            return color
+    '''Styling for summary dataframe: Color code for R-hat values: green if <1.01, red otherwise.'''
+    try:
+        v = float(val)
+        if v < 1.01:
+            color = "background-color: #c6efce"  # green
+        else:
+            color = "background-color: #ffc7ce"  # red
+    except:
+        color = ""
+    return color
+
 
 def abbrev_surveillance(name):
+    '''Abbreviate surveillance type and weighting from name.'''
     if name is None:
         return "nosurv"
     base = "surv"
@@ -56,6 +62,7 @@ def abbrev_surveillance(name):
     return f"{base}_{weight}"
 
 def abbrev_urbanisation(name):
+    '''Abbreviate urbanisation type and weighting from name.'''
     if name is None:
         return "nourb"
     base = "urb"
@@ -64,6 +71,7 @@ def abbrev_urbanisation(name):
     return f"{base}_{weight}{std}"
 
 def abbrev_stat(stat):
+    '''Abbreviate statistic name.'''
     # remove spaces
     s = stat.replace(" ", "")
     
@@ -72,7 +80,7 @@ def abbrev_stat(stat):
     lag_str = f"({lag.group(1)})" if lag else ""
     
     # check if _log is present
-    has_log = "_log" in s
+    has_log = ("_log" in s)
     
     # weighting
     if "pop_weighted" in s:
@@ -90,6 +98,8 @@ def abbrev_stat(stat):
         base += "_log"
     
     return f"{base}_{w}{lag_str}"
+
+###
 
 def model_settings_to_name(settings):
     surv = abbrev_surveillance(settings.get("surveillance_name"))
