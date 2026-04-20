@@ -16,6 +16,7 @@ from pymc.variational.callbacks import CheckParametersConvergence
 import io
 import base64
 import re
+import xarray as xr
 
 # if using uv env for CPU
 # import pytensor
@@ -34,6 +35,16 @@ from multiprocessing import Pool
 from _fitting.spline_utils import *
 
 
+def color_rhat(val):
+            try:
+                v = float(val)
+                if v < 1.01:
+                    color = "background-color: #c6efce"  # green
+                else:
+                    color = "background-color: #ffc7ce"  # red
+            except:
+                color = ""
+            return color
 
 def abbrev_surveillance(name):
     if name is None:
@@ -940,6 +951,65 @@ def build_model_name(alpha_type, alpha_parameters,
     parts = [f"[{stat_str}]"] + parts
     return "__".join(parts)
 
+def build_model_name_mult_stat(alpha_type, alpha_parameters,
+                                intercept_type, intercept_parameters,
+                                link, link_stat_name, link_type,
+                                b1_type, b1_parameters,
+                                c_type, c_parameters,
+                                stat_names, num_knots, knot_type, degree,
+                                spline_implementation, spline_type, spline_parameters,
+                                penalty_order, penalty_type, penalty_parameters, penalty_std,
+                                cutoff, beta_u_type, beta_u_parameters,
+                                exclude=None,
+                                surveillance_name=None,
+                                urbanisation_name='urbanisation_pop_weighted_std'):
+
+    surv = abbrev_surveillance(surveillance_name)
+    urb = abbrev_urbanisation(urbanisation_name)
+    stats = stat_names or []
+    if len(stats) == 0:
+        stat_str = "nostat"
+    else:
+        stat_str = "+".join(abbrev_stat(s) for s in stats)
+
+    exclude = exclude or []
+
+    def fmt_params(params):
+        return "(" + ",".join(f"{k}={v}" for k, v in params.items()) + ")"
+
+    parts = []
+    
+    # Spline stats 0
+    if stat_names is not None and 'stats' not in exclude:
+        if len(stats) == 0:
+            stat_str = "nostat"
+        else:
+            s_strings = []
+            for s in stat_names:
+                abbrev_s = abbrev_stat(s)
+                s_p = ",".join(f"{k}={v[s]}" for k, v in penalty_parameters.items())
+                num_knots_s = num_knots[s]
+                s_str = f"[{abbrev_s}({s_p}, {num_knots_s})]"
+                s_strings.append(s_str)
+            stat_str = "+".join(s_strings)
+
+    # Alpha prior 3
+    if alpha_parameters is not None and 'alpha' not in exclude:
+        parts.append(f"alpha({alpha_type},{fmt_params(alpha_parameters)})")
+
+    # Intercept prior 4
+    if intercept_parameters is not None and 'intercept' not in exclude:
+        parts.append(f"intercept({intercept_type},{fmt_params(intercept_parameters)})")
+
+    # Urbanisation prior 7
+    if beta_u_parameters is not None and 'beta_u' not in exclude:
+        parts.append(f"betau({beta_u_type},{fmt_params(beta_u_parameters)})")
+
+    # parts = [parts[i] for i in [2, 1, 0, 3, 4, 5, 6, 7, 8] if i < len(parts)]
+    # parts = [f"[{surv}, {urb}][{stat_str}]"] + parts
+    parts = [stat_str] + parts
+    return "__".join(parts)
+
 def build_sig_spline_p_model_(data,
                              alpha_type, alpha_parameters,
                              intercept_type, intercept_parameters,
@@ -1508,6 +1578,147 @@ def build_model_equispaced_exact(data,
     
     return model, m, B, knot_list
 
+def build_model_exact_mult_stat(data,
+                             alpha_type, alpha_parameters,
+                             intercept_type, intercept_parameters,
+                             beta_u_type, beta_u_parameters,
+                             link, link_stat_name, link_type,
+                             b1_type, b1_parameters,
+                             c_type, c_parameters,
+                             stat_names, num_knots, knot_type, degree,
+                             spline_implementation, spline_type, spline_parameters,
+                             penalty_order, penalty_type, penalty_parameters, penalty_std,
+                             cutoff, 
+                             exclude=None,
+                             surveillance_name=None,
+                             urbanisation_name='urbanisation_pop_weighted_std'):
+
+    m = build_model_name_mult_stat(alpha_type, alpha_parameters,
+                        intercept_type, intercept_parameters,
+                        link, link_stat_name, link_type,
+                        b1_type, b1_parameters,
+                        c_type, c_parameters,
+                        stat_names, num_knots, knot_type, degree,
+                        spline_implementation, spline_type, spline_parameters,
+                        penalty_order, penalty_type, penalty_parameters, penalty_std,
+                        cutoff, beta_u_type, beta_u_parameters,
+                        exclude=exclude)
+
+    model = pm.Model()
+    with model:
+        # Priors
+        if alpha_type == 'exponential':
+            alpha = pm.Exponential("alpha", lam=alpha_parameters['lam'])
+        elif alpha_type == 'gamma':
+            alpha = pm.Gamma("alpha", alpha=alpha_parameters['a'], beta=alpha_parameters['b'])
+        if intercept_type == 'normal':
+            intercept = pm.Normal("intercept", mu=intercept_parameters['mu'], sigma=intercept_parameters['sigma'])
+        if urbanisation_name is not None:
+            beta_u = pm.Normal("beta_u", mu=beta_u_parameters['mu'], sigma=beta_u_parameters['sigma'])
+        
+        # splines
+        B = None
+        knot_list = None
+        if stat_names is not None:
+            knot_list = {}
+            V_r_dict = {}
+            B = {}
+            sigma_w = {}
+            w = {}
+            f = {}
+            for stat_name in stat_names:
+                d = data[stat_name].values
+                # d = np.clip(d, np.percentile(d, 0.1), np.percentile(d, 99.9))
+
+                B_full, _, _, knot_list[stat_name] = eval_spline_basis_equispaced_numeric(degree, np.min(d), np.max(d), num_knots[stat_name], d).values()
+
+                if spline_implementation == 'svd':
+                    B_full_centred = B_full - B_full.mean(axis=0)  # centre the spline basis functions
+                    U, S, Vt = np.linalg.svd(B_full_centred, full_matrices=False)
+                    k = len(S)
+                    r = np.sum(S > 1e-10)
+                    U_r = U[:, :r]
+                    S_r = S[:r]
+                    Vt_r = Vt[:r, :]
+                    V_r = np.ascontiguousarray(Vt_r.T)
+                    V_r_dict[stat_name] = V_r
+                    X_r = U_r @ np.diag(S_r)
+                    X_r = np.ascontiguousarray(X_r)  # ensure X_r is C-contiguous for PyMC
+                    B[stat_name] = X_r
+
+                    # Spline coefficients
+                    if spline_type == 'halfnormal':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfNormal(f"sigma_w({stat_name})", sigma=spline_parameters['sigma_w_sigma'])
+                    elif spline_type == 'halfstudentt':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfStudentT(f"sigma_w({stat_name})", nu=spline_parameters['sigma_w_nu'], sigma=spline_parameters['sigma_w_sigma'])
+                    w[stat_name] = pm.Normal(f"w({stat_name})", mu=0, sigma=sigma_w[stat_name], size=B[stat_name].shape[1], dims=f"splines_{stat_name}")
+                    # ws0 = B[stat_name].shape[1]
+                    # w_ = pm.Normal(f"w_({stat_name})", mu=0, sigma=1.0, size=B[stat_name].shape[1], dims="splines")
+                    # w[stat_name] = pm.Deterministic(f"w({stat_name})", w_ * sigma_w[stat_name])
+
+                    f[stat_name] = pm.math.dot(B[stat_name], w[stat_name])
+
+                    if penalty_order is not None:
+                        if penalty_type == 'halfnormal':
+                            h = (np.max(d) - np.min(d)) / (num_knots[stat_name] + 1)
+                            #p_ = pm.HalfNormal(f"p_({stat_name})", sigma=1.0)
+                            #p = pm.Deterministic(f'p({stat_name})', p_ * penalty_parameters['sigma'])
+                            p = pm.Deterministic(f'p({stat_name})', pt.as_tensor_variable(penalty_parameters['p'][stat_name]))
+
+                        #D = difference_matrix(k, order=penalty_order)
+                        #DV = D @ Vt_r.T
+                        #DV = np.ascontiguousarray(DV)
+                        #DV = pt.as_tensor_variable(DV)
+                        
+                        if penalty_std:
+                            raise ValueError("penalty_std=True is not allowed")
+                        else:
+                            D2 = difference_matrix(k, order=2)        # (k-2, k)
+                            #print(D2)
+                            D2V = np.ascontiguousarray(D2 @ V_r)        # (k-2, k)(k, r) = (k-2, r)
+                            D2V_pt = pt.as_tensor_variable(D2V)
+                            D2Vw = pt.dot(D2V_pt, w[stat_name])
+                            int_f_dd_sq = (1 / (3 * h**3)) * (
+                                            D2Vw[0]**2
+                                            + 2 * pt.sum(D2Vw[1:-1]**2)
+                                            + D2Vw[-1]**2
+                                            + pt.sum(D2Vw[:-1] * D2Vw[1:])
+                                        )
+                            # Vw = Vt_r.T @ w[stat_name]
+                            # d2Vw = Vw[2:] - 2*Vw[1:-1] + Vw[:-2]
+                            # int_f_dd_sq = (1/(3*h**3))*(d2Vw[0]**2 + 2*pt.sum(d2Vw[1:-1]**2) + d2Vw[-1]**2 + pt.sum(d2Vw[0:-1]*d2Vw[1:]))
+                            # int_d2f2 = 1/h**3*(2/3*pt.dot(DVw, DVw) + 1/6*pt.dot(DVw1, DVw2))
+                            pm.Potential(f"spline_penalty({stat_name})", (-pt.log(p) -1/2*int_f_dd_sq/p**2) * r)
+                            pen = pm.Deterministic(f"pen({stat_name})", (-pt.log(p) -1/2*int_f_dd_sq/p**2))
+                            # pot = pm.Deterministic(f"pot({stat_name})", (-pt.log(p) -1/2*int_d2f2/p**2) * r)
+                            # pot_unit = pm.Deterministic(f"pot_unit({stat_name})", pot/r)
+                            # smoothness = pm.Deterministic(f"smoothness({stat_name})", 1/h**3*(2/3*pt.dot(DVw, DVw)))
+                            #full_smoothness = pm.Deterministic(f"full_smoothness({stat_name})",
+                                                               # 1/h**3*(2/3*pt.dot(DVw, DVw) + 1/6*pt.dot(DVw1, DVw2)))
+
+        # Link
+        log_mu = intercept + pm.math.log(data['population'])
+        surveillance_name = None
+        if surveillance_name is not None:
+            log_mu += pm.math.log(pm.math.max(data[surveillance_name], pm.math.log(1e-3)))
+        if urbanisation_name is not None:
+            log_mu += beta_u*data[urbanisation_name]
+        if stat_names is not None:
+            for stat_name in stat_names:
+                log_mu += f[stat_name]
+
+        # Zero-inflation component
+        if link is None:
+            y_obs = pm.NegativeBinomial('y_obs', mu=pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
+        else:
+            raise ValueError("link is not allowed for this model")
+
+    m = m[:200]
+    
+    return model, m, B, V_r_dict, knot_list
+
 def fit_sig_spline_p_model(data, data_name,
                            model_settings,
                            outpath, task,
@@ -1520,12 +1731,17 @@ def fit_sig_spline_p_model(data, data_name,
                             'spline': True, 'exp_spline': True, 'link': True, 'link_spline': True,
                             'divergences': True}):
     
+    V_r_dict = None
     if model_builder == 'build_sig_spline_p_model':
         model, m, B, knot_list = build_sig_spline_p_model(data.copy(), **model_settings)
         model_name = m
     if model_builder == 'build_model_equispaced_exact':
         model, m, B, knot_list = build_model_equispaced_exact(data.copy(), **model_settings)
         model_name = m  
+    if model_builder == 'build_model_exact_mult_stat':
+        model, m, B, V_r_dict, knot_list = build_model_exact_mult_stat(data.copy(), **model_settings)
+        model_name = m
+
     var_names = build_var_names(model_settings['alpha_parameters'], model_settings['intercept_parameters'], model_settings['link'], model_settings['link_type'],
                                     model_settings['b1_parameters'], model_settings['c_parameters'], model_settings['stat_names'], model_settings['spline_implementation'],
                                     model_settings['penalty_order'], model_settings['penalty_parameters'], model_settings['beta_u_parameters'])
@@ -1553,8 +1769,12 @@ def fit_sig_spline_p_model(data, data_name,
         if check_idata and os.path.exists(idata_file):
             print(f"Skipping {model_name} idata compute, already exists.")
             idata = az.from_netcdf(idata_file)
-            with open(os.path.join(output_path, "divergences.txt"), "r") as f:
-                n_divergences = int(f.readline().strip())
+            try:
+                with open(os.path.join(output_path, "divergences.txt"), "r") as f:
+                    n_divergences = int(f.readline().strip())
+            except (FileNotFoundError, ValueError):
+                n_divergences = 0
+
             if "log_likelihood" not in idata.groups():
                 print(f"Log likelihood missing, recomputing...")
                 pm.compute_log_likelihood(idata, progressbar=False)
@@ -1566,10 +1786,15 @@ def fit_sig_spline_p_model(data, data_name,
                 print('saved idata to', idata_file)
                 times = (0.0, 0.0)
             else:
-                with open(os.path.join(output_path, "times.txt"), "r") as f:
-                    sampling_time = float(f.readline().strip())
-                    log_likelihood_time = float(f.readline().strip())
-                    times = (sampling_time, log_likelihood_time)
+                try:
+                    with open(os.path.join(output_path, "times.txt"), "r") as f:
+                        sampling_time = float(f.readline().strip())
+                        log_likelihood_time = float(f.readline().strip())
+                        times = (sampling_time, log_likelihood_time)
+                except (FileNotFoundError, ValueError):
+                    sampling_time = 0.0
+                    log_likelihood_time = 0.0
+                    times = (0.0, 0.0)
         else:
             target_accept = 0.8
             max_treedepth = 10
@@ -1630,55 +1855,57 @@ def fit_sig_spline_p_model(data, data_name,
                 metrics_df.to_csv(outer_metrics_file, index=False)
             ####
 
-    #### WAIC and PSIS LOO
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        eval_waic = az.waic(idata, pointwise=True)
-        eval_psis_loo_elpd = az.loo(idata, pointwise=True)
-
     # Save pointwise values for later comparison
     pointwise_file = os.path.join(metrics_path, f"_metrics[{model_name}].npz")
-    #np.savez(
-        #pointwise_file,
-        #waic_pointwise=eval_waic.waic_i.values,
-        #loo_pointwise=eval_psis_loo_elpd.loo_i.values,
-        #pareto_k=eval_psis_loo_elpd.pareto_k.values
-    #)
-    mtime = time.time()
-    np.savez(
-        pointwise_file,
-        loo_elpd_loo = eval_psis_loo_elpd.elpd_loo,
-        loo_se = eval_psis_loo_elpd.se,
-        loo_p_loo = eval_psis_loo_elpd.p_loo,
-        loo_n_samples = eval_psis_loo_elpd.n_samples,
-        loo_n_data_points = eval_psis_loo_elpd.n_data_points,
-        loo_warning = eval_psis_loo_elpd.warning,
-
-        loo_pointwise=eval_psis_loo_elpd.loo_i.values,
-        pareto_k=eval_psis_loo_elpd.pareto_k.values,
-
-        waic_elpd_waic = eval_waic.elpd_waic,
-        waic_se = eval_waic.se,
-        waic_p_waic = eval_waic.p_waic,
-        waic_warning = eval_waic.warning,
-
-        waic_pointwise=eval_waic.waic_i.values,
-    )
-
-    # dataframes (inner and outer)
-    wl_df = pd.DataFrame([elpd_to_row(eval_waic, eval_psis_loo_elpd, model_name, data_name)])
-    inner_wl_file = os.path.join(output_path, "_model_elpd_metrics.csv")
-    outer_wl_file = os.path.join(data_path, "_model_elpd_metrics.csv")
-    wl_df.to_csv(inner_wl_file, index=False)
-    if os.path.exists(outer_wl_file):
-        wl_df.to_csv(outer_wl_file, mode="a", header=False, index=False)
+    if False: #os.path.exists(pointwise_file):
+        print(f"Skipping {model_name} metrics compute, already exists.")
+        wl_df = pd.read_csv(os.path.join(output_path, "_model_elpd_metrics.csv"))
     else:
-        wl_df.to_csv(outer_wl_file, index=False)
+        #### WAIC and PSIS LOO
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            eval_waic = az.waic(idata, pointwise=True)
+            eval_psis_loo_elpd = az.loo(idata, pointwise=True)
+        #np.savez(
+            #pointwise_file,
+            #waic_pointwise=eval_waic.waic_i.values,
+            #loo_pointwise=eval_psis_loo_elpd.loo_i.values,
+            #pareto_k=eval_psis_loo_elpd.pareto_k.values
+        #)
+        np.savez(
+            pointwise_file,
+            loo_elpd_loo = eval_psis_loo_elpd.elpd_loo,
+            loo_se = eval_psis_loo_elpd.se,
+            loo_p_loo = eval_psis_loo_elpd.p_loo,
+            loo_n_samples = eval_psis_loo_elpd.n_samples,
+            loo_n_data_points = eval_psis_loo_elpd.n_data_points,
+            loo_warning = eval_psis_loo_elpd.warning,
 
-    khat_fig = az.plot_khat(eval_psis_loo_elpd).get_figure()
-    fig_file = os.path.join(output_path, f"khat.png")
-    # khat_fig.savefig(fig_file, bbox_inches="tight")
-    plt.close(khat_fig)
+            loo_pointwise=eval_psis_loo_elpd.loo_i.values,
+            pareto_k=eval_psis_loo_elpd.pareto_k.values,
+
+            waic_elpd_waic = eval_waic.elpd_waic,
+            waic_se = eval_waic.se,
+            waic_p_waic = eval_waic.p_waic,
+            waic_warning = eval_waic.warning,
+
+            waic_pointwise=eval_waic.waic_i.values,
+        )
+
+        # dataframes (inner and outer)
+        wl_df = pd.DataFrame([elpd_to_row(eval_waic, eval_psis_loo_elpd, model_name, data_name)])
+        inner_wl_file = os.path.join(output_path, "_model_elpd_metrics.csv")
+        outer_wl_file = os.path.join(data_path, "_model_elpd_metrics.csv")
+        wl_df.to_csv(inner_wl_file, index=False)
+        if os.path.exists(outer_wl_file):
+            wl_df.to_csv(outer_wl_file, mode="a", header=False, index=False)
+        else:
+            wl_df.to_csv(outer_wl_file, index=False)
+
+        # khat_fig = az.plot_khat(eval_psis_loo_elpd).get_figure()
+        # fig_file = os.path.join(output_path, f"khat.png")
+        # khat_fig.savefig(fig_file, bbox_inches="tight")
+        # plt.close(khat_fig)
     ####
     idata_posterior = idata.posterior
     # ---------- Summary table ----------
@@ -1689,11 +1916,119 @@ def fit_sig_spline_p_model(data, data_name,
                 vals = idata_posterior[v].values
                 if np.std(vals) > 0:
                     filtered.append(v)
-        summary_df = az.summary(idata, var_names=filtered)
+        summary_df = az.summary(idata, var_names=filtered, round_to=None)
+        summary_df.drop(columns=["r_hat"], inplace=True, errors="ignore")
+
+        summary_rhat= az.rhat(idata, var_names=filtered)
+        summary_rhat_df = {}
+
+        for var_name in summary_rhat.data_vars:
+            da = summary_rhat[var_name].values
+            if len(da.shape) == 0:
+                summary_rhat_df[var_name] = da
+            else:
+                for i, val in enumerate(da):
+                    summary_rhat_df[f"{var_name}[{i}]"] = val
+
+        summary_rhat_df = pd.DataFrame.from_dict(summary_rhat_df, orient="index", columns=["r_hat"])
+        summary_df = summary_df.join(summary_rhat_df, how="left")
+
+        if V_r_dict is not None:
+            f_metrics = {}
+            for stat_name in model_settings['stat_names']:
+                x_vals = data[stat_name].values
+                order = np.argsort(x_vals)
+                x_vals = x_vals[order]
+                x_vals_min, x_vals_max = np.min(x_vals), np.max(x_vals)
+                x_vals_metric = np.linspace(x_vals_min, x_vals_max, 100)
+
+                w_samples = idata.posterior[f'w({stat_name})'].values
+                B_metric, _, _, knot_list[stat_name] = eval_spline_basis_equispaced_numeric(3,
+                                                    x_vals_min, x_vals_max, model_settings['num_knots'][stat_name], x_vals_metric).values()
+                B_metric = B_metric - B_metric.mean(axis=0)  # centre the spline basis functions
+                B_eff = B_metric @ V_r_dict[stat_name]
+                f_samples = np.einsum("cdr,xr->cdx", w_samples, B_eff)
+                
+                f_idata = az.convert_to_inference_data(
+                                                        xr.DataArray(
+                                                            f_samples,
+                                                            dims=["chain", "draw", "x"]
+                                                        )
+                                                    )
+                f_rhat = az.rhat(f_idata)["x"].values
+                f_ess_bulk = az.ess(f_idata, method="bulk")["x"].values
+                f_ess_tail = az.ess(f_idata, method="tail")["x"].values
+                # f metrics
+                f_metrics[stat_name] = {
+                                "ess_bulk_min": np.min(f_ess_bulk),
+                                "ess_bulk_p5": np.percentile(f_ess_bulk, 5),
+                                "ess_bulk_median": np.median(f_ess_bulk),
+
+                                "ess_tail_min": np.min(f_ess_tail),
+                                "ess_tail_p5": np.percentile(f_ess_tail, 5),
+                                "ess_tail_median": np.median(f_ess_tail),
+
+                                "r_hat_max": np.max(f_rhat),
+                                "r_hat_95": np.percentile(f_rhat, 95),
+                            }
+                ##
+                plot_reconstructed_f = False
+                if plot_reconstructed_f:
+                    f_mean = f_samples.mean(axis=(0,1))
+                    f_lower5 = np.percentile(f_samples, 5, axis=(0,1))
+                    f_upper95 = np.percentile(f_samples, 95, axis=(0,1))
+
+                    fig, ax = plt.subplots()
+                    ax.plot(x_vals_metric, f_mean, label="reconstructed mean f(x)")
+                    ax.fill_between(x_vals_metric, f_lower5, f_upper95, color='lightblue', alpha=0.5, label="90% credible interval")
+                    ax.set_title(f"{stat_name} spline mean reconstruction")
+                    ax.set_xlabel("x")
+                    ax.set_ylabel("f(x)")
+                    ax.legend()
+                    fig_file = os.path.join(output_path, f"{stat_name}_f_mean.png")
+                    fig.savefig(fig_file, bbox_inches="tight", dpi=100)
+                    plt.close(fig)
+                ##
+            f_summary_df = (
+                    pd.DataFrame.from_dict(f_metrics, orient="index")
+                    .reset_index()
+                    .rename(columns={"index": "stat_name"})
+                )
+            #f_summary_df = pd.DataFrame(f_metrics, index=[0])
+            f_summary_file = os.path.join(output_path, "f_summary.csv")
+            f_summary_df.to_csv(f_summary_file)
+            f_summary_html = (f_summary_df.style.format({"ess_bulk_min": "{:.2f}",
+                                                      "ess_bulk_p5": "{:.2f}",
+                                                      "ess_bulk_median": "{:.2f}",
+
+                                                      "ess_tail_min": "{:.2f}",
+                                                      "ess_tail_p5": "{:.2f}",
+                                                      "ess_tail_median": "{:.2f}",
+
+                                                      "r_hat_max": "{:.6f}",
+                                                      "r_hat_95": "{:.6f}"})
+                        .map(color_rhat, subset=["r_hat_max", "r_hat_95"])
+                        .to_html())
+                
+        else:
+            f_summary_html = None
+
         summary_file = os.path.join(output_path, "summary.csv")
         summary_df.to_csv(summary_file)
-        summary_html = summary_df.to_html()
+
+        summary_html = (summary_df.style.format({"mean":      "{:.3f}",
+                                                "sd":        "{:.3f}",
+                                                "hdi_3%":    "{:.3f}",
+                                                "hdi_97%":   "{:.3f}",
+                                                "mcse_mean": "{:.3f}",
+                                                "mcse_sd":   "{:.3f}",
+                                                "ess_bulk":  "{:.2f}",
+                                                "ess_tail":  "{:.2f}",
+                                                "r_hat":     "{:.6f}",})
+                        .map(color_rhat, subset=["r_hat"])
+                        .to_html())
     else:
+        f_summary_html = None
         summary_html = None
 
     # ---------- Trace plot ----------
@@ -1736,7 +2071,7 @@ def fit_sig_spline_p_model(data, data_name,
             # warnings.simplefilter("ignore")
              #eval_waic = az.waic(idata)
             # eval_psis_loo_elpd = az.loo(idata)
-        wl_df = pd.DataFrame([elpd_to_row(eval_waic, eval_psis_loo_elpd, m, 'd')])
+        # wl_df = pd.DataFrame([elpd_to_row(eval_waic, eval_psis_loo_elpd, m, 'd')])
         wl_html = wl_df.to_html()
     else:
         wl_html = None
@@ -1816,14 +2151,14 @@ def fit_sig_spline_p_model(data, data_name,
     else:
         div_img = None
 
-    go_report(report_path, m, idata, n_divergences, times, show, summary_html, wl_html, trace_img, pair_img, spline_imgs, exp_spline_imgs, zi_img, zi_s_img, div_img)
+    go_report(report_path, m, idata, n_divergences, times, show, summary_html, f_summary_html, wl_html, trace_img, pair_img, spline_imgs, exp_spline_imgs, zi_img, zi_s_img, div_img)
     # create_html_report(output_path, model_name=model_name, n_draws=n_draws, reports_folder=report_path, replace=(not check_report), clear_images=True)
     if clear_idata:
         # delete nc file to save space
         os.remove(idata_file)
     return
 
-def go_report(report_path, m, idata, n_divergences, times, show, summary_html, wl_html, trace_img, pair_img, spline_imgs, exp_spline_imgs, zi_img, zi_s_img, div_img):
+def go_report(report_path, m, idata, n_divergences, times, show, summary_html, f_summary_html, wl_html, trace_img, pair_img, spline_imgs, exp_spline_imgs, zi_img, zi_s_img, div_img):
     # ---------- Build HTML ----------
     html_parts = []
 
@@ -1860,6 +2195,8 @@ def go_report(report_path, m, idata, n_divergences, times, show, summary_html, w
         html_parts.append(f"""
         <h2>Summary</h2>
         {summary_html}
+        <h2>f Summary</h2>
+        {f_summary_html if f_summary_html is not None else ""}
         <p>Divergences: {n_divergences} out of {total_samples} samples ({div_pct:.2f}%)</p>
         """)
 
@@ -1943,7 +2280,6 @@ def go_report(report_path, m, idata, n_divergences, times, show, summary_html, w
 
     print(f"Saved report to {report_file}")
 
-
 def ess_style(x, n_draws):
     if isinstance(x, (int, float)):
         if x < n_draws / 5:
@@ -1987,7 +2323,7 @@ def create_html_report(model_folder, model_name, n_draws, reports_folder=None, t
     for tfile in table_files:
         tpath = os.path.join(model_folder, tfile)
         if os.path.exists(tpath):
-            df = pd.read_csv(tpath).round(2)
+            df = pd.read_csv(tpath)#.round(2)
             # apply formatting only if relevant columns exist
             int_cols = ["ess_bulk", "ess_tail", "waic_warning", "n_pareto_k_bad", "n_pareto_k_very_bad"]
             fmt_dict = {c: "{:.2f}" for c in df.select_dtypes(include="number").columns if c not in int_cols}

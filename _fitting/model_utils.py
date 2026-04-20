@@ -996,7 +996,11 @@ def compare_models(outpath, data_name, task, metric="loo", npz_files=None):
     models = {}
     for npz_file in npz_files:
         model_name = os.path.basename(npz_file)[9:-5]  # Extract from _metrics[...].npz
-        data = np.load(npz_file)
+        try:
+            data = np.load(npz_file)
+        except Exception as e:
+            print(f"Error loading {npz_file}: {e}")
+            continue
         models[model_name] = data[f'{metric}_pointwise']
     
     # Build comparison dataframe

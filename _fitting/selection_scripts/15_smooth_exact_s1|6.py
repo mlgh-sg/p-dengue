@@ -1,3 +1,4 @@
+import multiprocessing
 import sys
 from pathlib import Path
 project_root = Path.cwd()  # importing functions from other folders
@@ -33,19 +34,27 @@ else:
 data_settings = {'admin':2, 'max_lag':6, 'start_year':2016, 'start_month':1, 'end_year':2019, 'end_month':12}
 data_name = data_settings_to_name(data_settings)
 
-fitting_task = 'smooth_exact_s1|6_selection'
+fitting_task = 'smooth_exact_s1|6_selection_othervals1'
 
 ################################################################################
 
 def init_worker():
     """Initialize worker process with data"""
     global worker_data, worker_data_name, worker_outpath
+    global _first_task, _worker_id
+    _first_task = True
+    _worker_id = multiprocessing.current_process()._identity[0]
     worker_data = read_in(folder, **data_settings, standardise=True, dropna=True, celsius=True, tp_log=True)
     worker_data_name = data_name
     worker_outpath = outpath
     print(f"Worker initialized with data: {worker_data_name}")
 
 def worker(task):
+    global _first_task, _worker_id
+    if _first_task:
+        print('stutter')
+        # time.sleep(_worker_id * 30)
+
     """Fit a single model"""
     model_name, model_settings = task
     print(f'Fitting model: {model_name}')
@@ -71,10 +80,12 @@ def worker(task):
                     'spline': True, 'exp_spline': True, 'link': True, 'link_spline': True,
                     'divergences': True}
         )
-
+        _first_task = False
         return (model_name, "success")
+        
     except Exception as e:
         print(f"Error fitting {model_name}: {e}")
+        _first_task = False
         return (model_name, f"failed: {e}")
 
 ################################################################################
@@ -99,8 +110,20 @@ print(statistics)
 # p_vals = [1.0, 2.5, 5.0, 7.5, 10.0, 12.5, 16.0, 20.0, 25.0, 1000.0]
 # num_knots_list = [5, 10, 15, 20, 25, 30, 35, 40, 50, 60]
 
-p_vals = [1.0, 2.5, 5.0, 7.5, 10.0, 12.5, 16.0, 20.0, 25.0, 1000.0]
-num_knots_list = [5, 10, 15, 20, 25, 30, 35, 40, 50, 60]
+# p_vals = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 16.0, 25.0, 1000.0]
+# p_vals = [0.05, 0.1, 0.25, 0.5]
+# num_knots_list = [3, 5, 10, 15, 20, 30, 35, 40]
+
+# p_vals = [1.0, 2.5, 5.0, 10.0, 16.0, 25.0, 1000.0]
+# num_knots_list = [3]
+
+#p_vals = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5]
+#num_knots_list = [2, 3, 5, 10, 15]
+#statistics = ['rh_mean_pop_weighted(0)']
+
+p_vals = [0.05]
+num_knots_list = [15]
+statistics = ['t2m_max_pop_weighted(0)']
 
 if __name__ == "__main__":
     # Build model dictionary
@@ -139,15 +162,18 @@ if __name__ == "__main__":
                 model_dict[model_name] = settings
         
     # Create tasks list
-    tasks = list(model_dict.items())[2::3]
+    tasks = list(model_dict.items())
+    random.seed(42)  # for reproducibility
     random.shuffle(tasks)
+    tasks = tasks[:]
+    #random.shuffle(tasks)
     
     print(f"Fitting {len(tasks)} models in total...")
     print(f"Data: {data_name}")
     
     # Number of workers (adjust based on your server)
     # Each model uses n_chains, so N_WORKERS * n_chains = total cores used
-    N_WORKERS = 5
+    N_WORKERS = 1
     
     with Pool(N_WORKERS, initializer=init_worker) as p:
         results = p.map(worker, tasks)
