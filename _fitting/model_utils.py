@@ -24,7 +24,8 @@ import base64
 ###
 from _fitting._utils_naming import abbrev_surveillance, abbrev_urbanisation, abbrev_stat
 from _fitting._utils_style import color_switch, color_rhat, color_ess
-from _fitting.fitting_utils import path_setup
+from _fitting.fitting_utils import path_setup, elpd_to_row
+from _fitting._utils_html import create_html_report
 ###
 
 def model_settings_to_name(settings):
@@ -56,33 +57,6 @@ def settings_to_var_names(model_settings):
     v = v + [f'sigma_w({stat_name})' for stat_name in model_settings['stat_names']]
     v = v + [f'w({stat_name})' for stat_name in model_settings['stat_names']]
     return v
-
-def elpd_to_xr(elpd):
-    return xr.Dataset(
-        {k: xr.DataArray(v) for k, v in elpd.items()}
-    )
-
-def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
-    return {
-        "model_name": model_name,
-        "data_name": data_name,
-
-        # WAIC
-        "waic": float(eval_waic.elpd_waic),
-        #"p_waic": float(eval_waic.p_waic),
-        "waic_se": float(eval_waic.se),
-        "waic_warning": int(eval_waic.warning),
-
-        # LOO
-        "loo": float(eval_loo.elpd_loo),
-        #"p_loo": float(eval_loo.p_loo),
-        "loo_se": float(eval_loo.se),
-
-        # diagnostics
-        "n_pareto_k_bad": int(np.sum(eval_loo.pareto_k>0.7)),
-        "n_pareto_k_very_bad": int(np.sum(eval_loo.pareto_k>1)),
-        "pareto_k_mean": float(eval_loo.pareto_k.mean()),
-    }
 ###
 
 def model_fit(data, data_name, model_settings, outpath, n_chains=4, n_draws=500, n_tune=500, sampler="nutpie", invert_log=False, task=None, check_report=True, check_idata=True, clear_idata=False):
@@ -477,119 +451,6 @@ def model_fit_Bdropcentred(data, data_name,
         os.remove(idata_file)
     return
 
-def create_html_report(model_folder, model_name, n_draws, reports_folder=None, title=None, replace=False, clear_images=False):
-    """
-    Generate HTML report for a single model.
-
-    Args:
-        model_folder: path to the model_name folder containing csv/images
-        model_name: name of the model
-        n_draws: number of draws for ESS coloring
-        reports_folder: if provided, also generate a report in this folder
-        title: optional HTML title
-        clear_images: if True, remove image files after generating the report
-    """
-
-    # Paths for output HTML files
-    out_files = [os.path.join(model_folder, f"report_[{model_name}].html")]
-    if reports_folder:
-        os.makedirs(reports_folder, exist_ok=True)
-        out_files.append(os.path.join(reports_folder, f"report_[{model_name}].html"))
-    # If not replacing, check if files exist
-    if not replace:
-        if all(os.path.exists(f) for f in out_files):
-            print(f"Skipping HTML report for {model_name}, report already exists.")
-            return
-
-    if title is None:
-        title = f"Model Report: {model_name}"
-
-    # --- Read CSVs ---
-    table_files = ["_model_timings.csv", "summary.csv", "_model_elpd_metrics.csv"]
-    csv_html_parts = []
-    for tfile in table_files:
-        tpath = os.path.join(model_folder, tfile)
-        if os.path.exists(tpath):
-            df = pd.read_csv(tpath).round(2)
-            # apply formatting only if relevant columns exist
-            int_cols = ["ess_bulk", "ess_tail", "waic_warning", "n_pareto_k_bad", "n_pareto_k_very_bad"]
-            fmt_dict = {c: "{:.2f}" for c in df.select_dtypes(include="number").columns if c not in int_cols}
-            for c in int_cols:
-                if c in df.columns:
-                    df[c] = df[c].astype(int)
-                    fmt_dict[c] = "{:d}"
-            # Apply styling for summary.csv
-            if tfile == "summary.csv":
-                df_html = (df.style.format(fmt_dict)
-                    .map(lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1.01 else "background-color: lightgreen;",
-                         subset=["r_hat"] if "r_hat" in df.columns else [])
-                    .map(lambda x: color_ess(x, n_draws),
-                         subset=["ess_bulk", "ess_tail"] if "ess_bulk" in df.columns else [])
-                    ).to_html()
-            elif tfile == "_model_elpd_metrics.csv":
-                df_html = (df.style.format(fmt_dict)
-                    .map(lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1 else "background-color: lightgreen;",
-                         subset=["waic_warning"] if "waic_warning" in df.columns else [])
-                    .map(lambda x: "background-color: red;" if isinstance(x, (int, float)) and x > 0 else "background-color: lightgreen;",
-                         subset=["n_pareto_k_bad", "n_pareto_k_very_bad"] if "n_pareto_k_bad" in df.columns else [])
-                    .map(lambda x: "background-color: yellow;", subset=["waic", "loo"] if "waic" in df.columns else [])
-                    ).to_html()
-            else:
-                df_html = df.to_html(index=False, escape=False, border=0)
-
-            csv_html_parts.append(f"<h2>{tfile}</h2>\n{df_html}")
-
-    # --- Images ---
-    img_files = []
-    # trace.png
-    trace_path = os.path.join(model_folder, "trace.png")
-    if os.path.exists(trace_path):
-        img_files.append(("Trace Plot", trace_path))
-    # khat.png
-    khat_path = os.path.join(model_folder, "khat.png")
-    if os.path.exists(khat_path):
-        img_files.append(("Pareto k Diagnostics", khat_path))
-    # spline_*.png
-    for sf in sorted([f for f in os.listdir(model_folder) if f.startswith("spline_") and f.endswith(".png")]):
-        sf_path = os.path.join(model_folder, sf)
-        img_files.append((sf, sf_path))
-
-    # --- Assemble HTML ---
-    html_base = [
-        f"<html><head><title>{title}</title>",
-        "<style>",
-        "body { font-family: Arial; font-size: 12px; line-height: 1.2; margin: 8px; text-align:center; }",
-        "h1, h2 { margin: 4px 0 8px 0; font-weight: normal; }",
-        "table { border-collapse: collapse; font-size: 15px; margin: 0 auto 12px auto; width: 80%; }",
-        "table th, table td { border: 1px solid #aaa; padding: 4px 6px; text-align: center; }",
-        "img { max-width: 80%; margin: 8px auto; display: block; }",
-        "</style></head><body>",
-        f"<h1>{title}</h1>"
-    ]
-    html_base.extend(csv_html_parts)
-    html_parts = html_base.copy()
-    # Add images as base64
-    for caption, path in img_files:
-        html_parts.append(f"<h2>{caption}</h2>")
-        with open(path, "rb") as img_file:
-            img_data = base64.b64encode(img_file.read()).decode('utf-8')
-            html_parts.append(f'<img src="data:image/png;base64,{img_data}" style="max-width:100%;">')
-    
-    html_parts.append("</body></html>")
-
-    # --- Write HTML files ---
-    for html_file in out_files:
-        with open(html_file, "w") as f:
-            f.write("\n".join(html_parts))
-
-    print(f"HTML reports written to: {', '.join(out_files)}")
-
-    if clear_images:
-        # remove images to save space
-        for _, path in img_files:
-            os.remove(path)
-
-
 #############
 def build_model_choose_Bdropcentred_sigma_w_halft_zerotemp(data, stat_names, zero_stat_name,
                                                         disp_sigma, beta_u_sigma,
@@ -880,7 +741,105 @@ def data_settings_to_name(s):
     return f"a{admin}_{start}_{end}"
 
 ###########################
+def loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, pointwise=False):
+    rows = {}
+    for run in run_folders:
+        metrics_dir = os.path.join(model_fits_dir, run, 'metrics')
+        if not os.path.isdir(metrics_dir):
+            continue
+        for fname in os.listdir(metrics_dir):
+            if not fname.endswith('.npz'):
+                continue
+            fmodel = fname[9:-5]
+            if len(models) > 0 and fmodel not in models:
+                continue
+            metrics = np.load(os.path.join(metrics_dir, fname))
+            loo_pw = metrics['loo_pointwise']
+            pareto_k = metrics['pareto_k']
+            n = len(loo_pw)
+            rows[fname[:-4]] = {
+                'model': fmodel,
+                "loo mean": float(np.mean(loo_pw)),
+                "loo sum": float(np.sum(loo_pw)),
+                "loo std": float(np.std(loo_pw)),
+                "loo_cv" : np.std(loo_pw) / np.abs(np.mean(loo_pw)),
+                "loo mean se": float(np.std(loo_pw)/np.sqrt(len(loo_pw))),
+                
+                'safe loo mean': np.mean(loo_pw[pareto_k <= 0.7]),
+                'safe loo sum': np.sum(loo_pw[pareto_k <= 0.7]),
 
+                "n_pareto_k_bad": int(np.sum(pareto_k>0.7)),
+                "n_pareto_k_very_bad": int(np.sum(pareto_k>1)),
+                "pareto_k_mean": float(pareto_k.mean()),
+                
+                "pareto_k": pareto_k,
+                "pointwise": loo_pw,
+            }
+
+    if not rows:
+        raise ValueError("No models matched the given filters.")
+    
+    #df = pd.DataFrame(rows).T.sort_values('elpd_loo', ascending=False)
+    df = pd.DataFrame(rows).T.sort_values('loo mean', ascending=False)
+    df.insert(0, 'rank', range(len(df)))
+
+    best_pw = df['pointwise'].iloc[0]
+    best_pareto_k = df['pareto_k'].iloc[0]
+
+    elpd_diff_mean, elpd_diff_std, elpd_diff_dse = [], [], []
+    safe_elpd_diff_mean, safe_elpd_diff_std, safe_elpd_diff_dse = [], [], []
+
+    safe_elpd_diff_quantile = []
+    elpd_diff_quantile = []
+    for i in range(len(df)):
+        pw = df['pointwise'].iloc[i]
+        pareto_k = df['pareto_k'].iloc[i]
+        diff_pw = best_pw - pw
+        safe_diff_pw = diff_pw[(pareto_k <= 0.7) & (best_pareto_k <= 0.7)]
+
+        elpd_diff_mean.append(np.mean(diff_pw))
+        safe_elpd_diff_mean.append(np.mean(safe_diff_pw))
+
+        elpd_diff_std.append(np.std(diff_pw))
+        safe_elpd_diff_std.append(np.std(safe_diff_pw))
+
+        elpd_diff_dse.append(np.std(diff_pw)/np.sqrt(len(diff_pw)))
+        safe_elpd_diff_dse.append(np.std(safe_diff_pw)/np.sqrt(len(safe_diff_pw)))
+
+        elpd_diff_quantile.append(np.percentile(diff_pw, (1 - diff_quantile) * 100))
+        safe_elpd_diff_quantile.append(np.percentile(safe_diff_pw, (1 - diff_quantile) * 100))
+
+    df['loo diff mean'] = elpd_diff_mean
+    df['loo diff std'] = elpd_diff_std
+    df['loo mean se'] = elpd_diff_dse
+    df['safe_loo diff mean'] = safe_elpd_diff_mean
+    df['safe_loo diff std'] = safe_elpd_diff_std
+    df['safe_loo diff mean se'] = safe_elpd_diff_dse
+
+    df['loo_diff_quantile'] = elpd_diff_quantile
+    df['safe_loo_diff_quantile'] = safe_elpd_diff_quantile
+    
+    # df = df.set_index('model')
+    if not pointwise:
+        df = df.drop(columns='pointwise')
+        df = df.drop(columns='pareto_k')
+    return df[['rank', 'model',
+               'n_pareto_k_bad',
+               'loo mean', 'loo sum',
+               'loo diff mean',
+               'loo diff std', 
+               'loo mean se', 
+               'loo_diff_quantile',
+               
+               'n_pareto_k_bad',
+               'safe loo mean', 'safe loo sum',
+               'safe_loo diff mean',
+               'safe_loo diff std',
+               'safe_loo diff mean se',
+               'safe_loo_diff_quantile',
+
+               'n_pareto_k_very_bad', 'pareto_k_mean']].set_index('rank')
+                                                                                     
 def compare_models(outpath, data_name, task, metric="loo", npz_files=None):
     """
     Compare multiple models using pointwise ELPD values.
@@ -904,9 +863,6 @@ def compare_models(outpath, data_name, task, metric="loo", npz_files=None):
     
     if len(npz_files) == 0:
         raise ValueError(f"No files found in {metrics_path}")
-    
-    # print(f"Comparing models using {metric.upper()}")
-    # print("="*100)
     
     # Load all models
     models = {}

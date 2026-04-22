@@ -1,8 +1,11 @@
 # Imports and CPU / GPU setup
+GPU = True
+CPU = not GPU
 
 # if using conda env for jax GPU
-import subprocess, os; os.environ["CUDA_VISIBLE_DEVICES"] = str(max([(int(l.split(',')[0]), int(l.split(',')[1])) for l in subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,nounits,noheader'], capture_output=True, text=True).stdout.strip().split('\n')], key=lambda x: x[1])[0])
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+if GPU:
+    import subprocess, os; os.environ["CUDA_VISIBLE_DEVICES"] = str(max([(int(l.split(',')[0]), int(l.split(',')[1])) for l in subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,nounits,noheader'], capture_output=True, text=True).stdout.strip().split('\n')], key=lambda x: x[1])[0])
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 import numpy as np
 import pandas as pd
@@ -22,8 +25,9 @@ import re
 import xarray as xr
 
 # if using uv env for CPU
-# import pytensor
-# pytensor.config.mode='NUMBA'
+if CPU:
+    import pytensor
+    pytensor.config.mode='NUMBA'
 
 import pytensor.tensor as pt
 from scipy.sparse.linalg import eigsh
@@ -40,9 +44,9 @@ from _fitting._utils_spline import *
 from _fitting._utils_naming import abbrev_surveillance, abbrev_urbanisation, abbrev_stat
 from _fitting._utils_spline import difference_matrix
 from _fitting._utils_style import color_switch, color_rhat, color_ess
-from _fitting.fitting_utils import path_setup
+from _fitting.fitting_utils import path_setup, elpd_to_row
+from _fitting._utils_html import go_report, fig_to_base64
 ###
-
 
 def model_settings_to_name(settings):
     surv = abbrev_surveillance(settings.get("surveillance_name"))
@@ -65,15 +69,6 @@ def model_settings_to_name(settings):
         return f"[{surv}__{urb}][{stat_str}][]"
     else:
         return f"[{surv}__{urb}][{stat_str}][{k}, {p}]"
-    
-
-def fig_to_base64(fig):
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=100)
-    buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode("utf-8")
-    plt.close(fig)
-    return img_base64
 
 def plot_link(x, idata, var_names=['zi_b0', 'zi_b1'], link='logit'):
     idata_posterior = idata.posterior
@@ -197,8 +192,6 @@ def plot_link_spline(x, idata, stat_name, B, knots, var_names=['zi_b0', 'zi_b1']
     link_samples = link_samples * s_samples.T
 
     link_mean = link_samples.mean(axis=0)
-    # link_lower5 = np.percentile(link_samples, 25, axis=0)
-    # link_upper5 = np.percentile(link_samples, 75, axis=0)
     link_lower = np.percentile(link_samples, 2.5, axis=0)
     link_upper = np.percentile(link_samples, 97.5, axis=0)
 
@@ -226,13 +219,10 @@ def plot_link_spline(x, idata, stat_name, B, knots, var_names=['zi_b0', 'zi_b1']
 def plot_exp_spline_(x, idata, stat_name, B, knots):
     id = np.argsort(x)
     x = x[id]
-    x_mean = np.mean(x)
-    x_std_dev = np.std(x)
 
     ###
     knots_local = np.array(knots, copy=True)
     B_local = np.array(B, copy=True, order="F")
-    # data_local = np.array(x, copy=True)
     B_plot = B_local[id]
     
     # Extract posterior samples
@@ -245,8 +235,7 @@ def plot_exp_spline_(x, idata, stat_name, B, knots):
     link_samples = s_samples.T
 
     link_mean = link_samples.mean(axis=0)
-    # link_lower5 = np.percentile(link_samples, 25, axis=0)
-    # link_upper5 = np.percentile(link_samples, 75, axis=0)
+    link_median = np.percentile(link_samples, 50, axis=0)
     link_lower = np.percentile(link_samples, 2.5, axis=0)
     link_upper = np.percentile(link_samples, 97.5, axis=0)
 
@@ -259,8 +248,18 @@ def plot_exp_spline_(x, idata, stat_name, B, knots):
 
     plt.ylim(-0.01, 1.8)
     plt.plot(x, link_mean, label='Mean Link', color='blue')
+    plt.plot(x, link_median, label='Median Link', color='red', linestyle='--')
     plt.fill_between(x, link_hdi[:, 0], link_hdi[:, 1], color='blue', alpha=0.3, label='95% HDI')
-    plt.xlabel('x')
+
+    abbrev_stat_name = abbrev_stat(stat_name)
+    invert_log = True
+    if (invert_log) & (stat_name[0:2] == 'tp'):
+        abbrev_stat_name = abbrev_stat_name.replace("_log", "")
+        xlab = f'{abbrev_stat_name} ({units[stat_name[0:2]]})'
+    else:
+        xlab = f'{abbrev_stat_name} ({units_log[stat_name[0:2]]})'
+
+    plt.xlabel(xlab)
     plt.ylabel('Multiplicative Effect (Spline)')
     plt.title(f'Posterior of Multiplicative Effect (Spline)')
     plt.legend()
@@ -283,6 +282,7 @@ def plot_exp_spline(x, idata, stat_name, B, knots, data=None, freq_transform=lam
     link_samples = s_samples.T
 
     link_mean = link_samples.mean(axis=0)
+    link_median = np.percentile(link_samples, 50, axis=0)
     link_lower = np.percentile(link_samples, 2.5, axis=0)
     link_upper = np.percentile(link_samples, 97.5, axis=0)
     link_lower5 = np.percentile(link_samples, 25, axis=0)
@@ -325,9 +325,19 @@ def plot_exp_spline(x, idata, stat_name, B, knots, data=None, freq_transform=lam
 
     ax.set_ylim(y_min, y_max)
     ax.plot(plot_data, link_mean, label='Mean Link', color='blue')
+    ax.plot(plot_data, link_median, label='Median Link', color='red', linestyle='--')
     ax.fill_between(plot_data, link_hdi[:, 0], link_hdi[:, 1], color='blue', alpha=0.3, label='95% HDI')
     ax.fill_between(plot_data, link_lower5, link_upper5, color='blue', alpha=0.3, label='50% HDI')
-    ax.set_xlabel('x')
+
+    abbrev_stat_name = abbrev_stat(stat_name)
+    invert_log = True
+    if (invert_log) & (stat_name[0:2] == 'tp'):
+        abbrev_stat_name = abbrev_stat_name.replace("_log", "")
+        xlab = f'{abbrev_stat_name} ({units[stat_name[0:2]]})'
+    else:
+        xlab = f'{abbrev_stat_name} ({units_log[stat_name[0:2]]})'
+    ax.set_xlabel(xlab)
+
     ax.set_yticks(np.arange(0.0, y_max + 0.5, 0.25))
     ax.set_ylabel('Multiplicative Effect (Spline)')
     ax.set_title(f'Posterior of Multiplicative Effect (Spline)')
@@ -402,27 +412,9 @@ def plot_spline_Bknots(idata, stat_name,
 
     ax.set_xlabel(xlab)
     ax.set_ylabel('Spline contribution')
-    # ax.set_ylim(-0.5, 3.5)
     ax.legend()
 
     return fig
-
-def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
-    return {"model_name": model_name,
-            "data_name": data_name,
-            # WAIC
-            "waic": float(eval_waic.elpd_waic),
-            #"p_waic": float(eval_waic.p_waic),
-            "waic_se": float(eval_waic.se),
-            "waic_warning": int(eval_waic.warning),
-            # LOO
-            "loo": float(eval_loo.elpd_loo),
-            #"p_loo": float(eval_loo.p_loo),
-            "loo_se": float(eval_loo.se),
-            # diagnostics
-            "n_pareto_k_bad": int(np.sum(eval_loo.pareto_k>0.7)),
-            "n_pareto_k_very_bad": int(np.sum(eval_loo.pareto_k>1)),
-            "pareto_k_mean": float(eval_loo.pareto_k.mean())}
 
 def go(data, m, model_dict, idata_dict, time_dict, B_dict,
        knot_list_dict, link_dict, stat_names_dict, var_names_dict, n_divergences_dict,
@@ -535,7 +527,7 @@ def go(data, m, model_dict, idata_dict, time_dict, B_dict,
         else:
             zi_img = None
     else:
-            zi_img = None
+        zi_img = None
 
     if show['link_spline']:
         if (link_dict[m] is not None)&(stat_names is not None):
@@ -554,9 +546,6 @@ def go(data, m, model_dict, idata_dict, time_dict, B_dict,
         stats = idata_dict[m].sample_stats.to_dataframe().reset_index()
         df = posterior.merge(stats, on=["chain","draw"])
 
-        #posterior = az.extract(idata_dict[m], combined=True).to_pandas()
-        #stats = idata_dict[m].sample_stats.to_dataframe()
-        #df = posterior.join(stats)
         sns.pairplot( df, vars=pp_var_names, hue="diverging",
                     corner=True, diag_kind='kde', plot_kws={"alpha":0.5, 's':1}, diag_kws={"common_norm": False})
         div_img = fig_to_base64(plt.gcf())
@@ -879,7 +868,7 @@ def build_model_name_mult_stat(alpha_type, alpha_parameters,
     parts = []
     
     # Spline stats 0
-    if stat_names is not None and 'stats' not in exclude:
+    if (stat_names is not None) and ('stats' not in exclude):
         if len(stats) == 0:
             stat_str = "nostat"
         else:
@@ -1172,8 +1161,6 @@ def build_sig_spline_p_model_(data,
                 elif link_type == 'additive':
                     y_obs = pm.ZeroInflatedNegativeBinomial('y_obs', psi=pm.math.invlogit(zi_x), mu=pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
 
-    # m += f"__non-centred-w"
-    # m += "boundary_knots"
     m = m[:200]
     
     return model, m, B, knot_list
@@ -1332,8 +1319,6 @@ def build_sig_spline_p_model(data,
                 elif link_type == 'additive':
                     y_obs = pm.ZeroInflatedNegativeBinomial('y_obs', psi=pm.math.invlogit(zi_x), mu=pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
 
-    # m += f"__non-centred-w"
-    # m += "boundary_knots"
     m = m[:200]
     
     return model, m, B, knot_list
@@ -1424,11 +1409,6 @@ def build_model_equispaced_exact(data,
                             #p_ = pm.HalfNormal(f"p_({stat_name})", sigma=1.0)
                             #p = pm.Deterministic(f'p({stat_name})', p_ * penalty_parameters['sigma'])
                             p = pm.Deterministic(f'p({stat_name})', pt.as_tensor_variable(penalty_parameters['p']))
-
-                        #D = difference_matrix(k, order=penalty_order)
-                        #DV = D @ Vt_r.T
-                        #DV = np.ascontiguousarray(DV)
-                        #DV = pt.as_tensor_variable(DV)
                         
                         if penalty_std:
                             raise ValueError("penalty_std=True is not allowed")
@@ -1453,7 +1433,7 @@ def build_model_equispaced_exact(data,
                             # pot = pm.Deterministic(f"pot({stat_name})", (-pt.log(p) -1/2*int_d2f2/p**2) * r)
                             # pot_unit = pm.Deterministic(f"pot_unit({stat_name})", pot/r)
                             # smoothness = pm.Deterministic(f"smoothness({stat_name})", 1/h**3*(2/3*pt.dot(DVw, DVw)))
-                            #full_smoothness = pm.Deterministic(f"full_smoothness({stat_name})",
+                            # full_smoothness = pm.Deterministic(f"full_smoothness({stat_name})",
                                                                # 1/h**3*(2/3*pt.dot(DVw, DVw) + 1/6*pt.dot(DVw1, DVw2)))
 
         # Link
@@ -1506,10 +1486,15 @@ def build_model_exact_mult_stat(data,
     model = pm.Model()
     with model:
         # Priors
+        #alpha = pm.Deterministic("alpha", pt.as_tensor_variable(1.0))
         if alpha_type == 'exponential':
             alpha = pm.Exponential("alpha", lam=alpha_parameters['lam'])
+            #alpha_0 = pm.Exponential("alpha_0", lam=alpha_parameters['lam'])
+            #alpha_0 = pm.Deterministic("alpha_0", pt.as_tensor_variable(0.0))
+            #pass
         elif alpha_type == 'gamma':
             alpha = pm.Gamma("alpha", alpha=alpha_parameters['a'], beta=alpha_parameters['b'])
+            #pass
         if intercept_type == 'normal':
             intercept = pm.Normal("intercept", mu=intercept_parameters['mu'], sigma=intercept_parameters['sigma'])
         if urbanisation_name is not None:
@@ -1518,6 +1503,7 @@ def build_model_exact_mult_stat(data,
         # splines
         B = None
         knot_list = None
+        V_r_dict = None
         if stat_names is not None:
             knot_list = {}
             V_r_dict = {}
@@ -1565,11 +1551,6 @@ def build_model_exact_mult_stat(data,
                             #p_ = pm.HalfNormal(f"p_({stat_name})", sigma=1.0)
                             #p = pm.Deterministic(f'p({stat_name})', p_ * penalty_parameters['sigma'])
                             p = pm.Deterministic(f'p({stat_name})', pt.as_tensor_variable(penalty_parameters['p'][stat_name]))
-
-                        #D = difference_matrix(k, order=penalty_order)
-                        #DV = D @ Vt_r.T
-                        #DV = np.ascontiguousarray(DV)
-                        #DV = pt.as_tensor_variable(DV)
                         
                         if penalty_std:
                             raise ValueError("penalty_std=True is not allowed")
@@ -1610,7 +1591,10 @@ def build_model_exact_mult_stat(data,
 
         # Zero-inflation component
         if link is None:
+            # y_obs = pm.ZeroInflatedPoisson('y_obs', psi=alpha, mu=pm.math.exp(log_mu), observed=data['cases'])
+            # y_obs = pm.Poisson('y_obs', mu=pm.math.exp(log_mu), observed=data['cases'])
             y_obs = pm.NegativeBinomial('y_obs', mu=pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
+            # y_obs = pm.NegativeBinomial('y_obs', mu=pm.math.exp(log_mu), alpha=alpha_0 + alpha*data['population']/1000000, observed=data['cases'])
         else:
             raise ValueError("link is not allowed for this model")
 
@@ -1691,6 +1675,16 @@ def fit_sig_spline_p_model(data, data_name,
             max_energy_error = 1000
 
             s0 = time.time()
+
+            if GPU==True and CPU==True:
+                print("Warning: Both GPU and CPU = True")
+            elif GPU==False and CPU==False:
+                print("Warning: Both GPU and CPU = False")
+            elif GPU:
+                nuts_sampler_kwargs = {"max_energy_error": max_energy_error, 'backend': 'jax', 'gradient_backend': 'jax'}
+            elif CPU:
+                nuts_sampler_kwargs = {"max_energy_error": max_energy_error}
+
             idata = pm.sample(
                 tune=n_tune,
                 draws=n_draws,
@@ -1700,8 +1694,8 @@ def fit_sig_spline_p_model(data, data_name,
                 store_divergences=True,
                 nuts_sampler="nutpie",
                 target_accept = target_accept,
-                max_treedepth = max_treedepth, # comment out below when using CPU
-                nuts_sampler_kwargs={"max_energy_error": max_energy_error, 'backend': 'jax', 'gradient_backend': 'jax'},
+                max_treedepth = max_treedepth,
+                nuts_sampler_kwargs=nuts_sampler_kwargs,
                 progressbar=True
             )
             s1 = time.time()
@@ -1747,7 +1741,7 @@ def fit_sig_spline_p_model(data, data_name,
 
     # Save pointwise values for later comparison
     pointwise_file = os.path.join(metrics_path, f"_metrics[{model_name}].npz")
-    if False: #os.path.exists(pointwise_file):
+    if os.path.exists(pointwise_file):
         print(f"Skipping {model_name} metrics compute, already exists.")
         wl_df = pd.read_csv(os.path.join(output_path, "_model_elpd_metrics.csv"))
     else:
@@ -1797,6 +1791,7 @@ def fit_sig_spline_p_model(data, data_name,
         # khat_fig.savefig(fig_file, bbox_inches="tight")
         # plt.close(khat_fig)
     ####
+
     idata_posterior = idata.posterior
     # ---------- Summary table ----------
     if show['summary']:
@@ -1879,44 +1874,35 @@ def fit_sig_spline_p_model(data, data_name,
                     fig.savefig(fig_file, bbox_inches="tight", dpi=100)
                     plt.close(fig)
                 ##
-            f_summary_df = (
-                    pd.DataFrame.from_dict(f_metrics, orient="index")
-                    .reset_index()
-                    .rename(columns={"index": "stat_name"})
-                )
-            #f_summary_df = pd.DataFrame(f_metrics, index=[0])
+            f_summary_df = (pd.DataFrame.from_dict(f_metrics, orient="index").reset_index().rename(columns={"index": "stat_name"}))
             f_summary_file = os.path.join(output_path, "f_summary.csv")
             f_summary_df.to_csv(f_summary_file)
-            f_summary_html = (f_summary_df.style.format({"ess_bulk_min": "{:.2f}",
-                                                      "ess_bulk_p5": "{:.2f}",
-                                                      "ess_bulk_median": "{:.2f}",
+            f_summary_html = (f_summary_df.style.format({"ess_bulk_min":    "{:.2f}",
+                                                         "ess_bulk_p5":     "{:.2f}",
+                                                         "ess_bulk_median": "{:.2f}",
 
-                                                      "ess_tail_min": "{:.2f}",
-                                                      "ess_tail_p5": "{:.2f}",
-                                                      "ess_tail_median": "{:.2f}",
+                                                         "ess_tail_min":    "{:.2f}",
+                                                         "ess_tail_p5":     "{:.2f}",
+                                                         "ess_tail_median": "{:.2f}",
 
-                                                      "r_hat_max": "{:.6f}",
-                                                      "r_hat_95": "{:.6f}"})
-                        .map(color_rhat, subset=["r_hat_max", "r_hat_95"])
-                        .to_html())
-                
+                                                         "r_hat_max":       "{:.6f}",
+                                                         "r_hat_95":        "{:.6f}"})
+                        .map(color_rhat, subset=["r_hat_max", "r_hat_95"]).to_html())
         else:
             f_summary_html = None
 
         summary_file = os.path.join(output_path, "summary.csv")
         summary_df.to_csv(summary_file)
-
         summary_html = (summary_df.style.format({"mean":      "{:.3f}",
-                                                "sd":        "{:.3f}",
-                                                "hdi_3%":    "{:.3f}",
-                                                "hdi_97%":   "{:.3f}",
-                                                "mcse_mean": "{:.3f}",
-                                                "mcse_sd":   "{:.3f}",
-                                                "ess_bulk":  "{:.2f}",
-                                                "ess_tail":  "{:.2f}",
-                                                "r_hat":     "{:.6f}",})
-                        .map(color_rhat, subset=["r_hat"])
-                        .to_html())
+                                                "sd":         "{:.3f}",
+                                                "hdi_3%":     "{:.3f}",
+                                                "hdi_97%":    "{:.3f}",
+                                                "mcse_mean":  "{:.3f}",
+                                                "mcse_sd":    "{:.3f}",
+                                                "ess_bulk":   "{:.2f}",
+                                                "ess_tail":   "{:.2f}",
+                                                "r_hat":      "{:.6f}",})
+                        .map(color_rhat, subset=["r_hat"]).to_html())
     else:
         f_summary_html = None
         summary_html = None
@@ -1957,11 +1943,6 @@ def fit_sig_spline_p_model(data, data_name,
 
     # ---------- WAIC and PSIS LOO ----------
     if show['metrics']:
-        # with warnings.catch_warnings():
-            # warnings.simplefilter("ignore")
-             #eval_waic = az.waic(idata)
-            # eval_psis_loo_elpd = az.loo(idata)
-        # wl_df = pd.DataFrame([elpd_to_row(eval_waic, eval_psis_loo_elpd, m, 'd')])
         wl_html = wl_df.to_html()
     else:
         wl_html = None
@@ -2022,13 +2003,15 @@ def fit_sig_spline_p_model(data, data_name,
     else:
         zi_img = None
 
-    if (show['link_spline']&(link is not None)&(stat_names is not None)&(link_stat_name in stat_names)):
-        fig_link_spline = plot_link_spline(data[link_stat_name].values, idata,
-                                            link_stat_name, B[link_stat_name],
-                                            knot_list[link_stat_name], link=link)
-        zi_s_img = fig_to_base64(fig_link_spline)
-    else:
-        zi_s_img = None
+    zi_s_img = None
+    if (show['link_spline']):
+        if (link is not None):
+            if (stat_names is not None):
+                if (link_stat_name in stat_names):
+                    fig_link_spline = plot_link_spline(data[link_stat_name].values, idata,
+                                                        link_stat_name, B[link_stat_name],
+                                                        knot_list[link_stat_name], link=link)
+                    zi_s_img = fig_to_base64(fig_link_spline)
         
     #--- Divergences plot ---
     if show['divergences']&(n_divergences > 0):
@@ -2042,242 +2025,7 @@ def fit_sig_spline_p_model(data, data_name,
         div_img = None
 
     go_report(report_path, m, idata, n_divergences, times, show, summary_html, f_summary_html, wl_html, trace_img, pair_img, spline_imgs, exp_spline_imgs, zi_img, zi_s_img, div_img)
-    # create_html_report(output_path, model_name=model_name, n_draws=n_draws, reports_folder=report_path, replace=(not check_report), clear_images=True)
     if clear_idata:
         # delete nc file to save space
         os.remove(idata_file)
     return
-
-def go_report(report_path, m, idata, n_divergences, times, show, summary_html, f_summary_html, wl_html, trace_img, pair_img, spline_imgs, exp_spline_imgs, zi_img, zi_s_img, div_img):
-    # ---------- Build HTML ----------
-    html_parts = []
-
-    # --- Precompute reusable values ---
-    total_samples = (
-        idata.posterior.sizes['draw'] *
-        idata.posterior.sizes['chain']
-    )
-    div_pct = n_divergences / total_samples * 100
-
-    # --- Header ---
-    html_parts.append(f"""
-    <html>
-    <head>
-        <title>Model Report: {m}</title>
-        <style>
-            body {{ font-family: Arial; margin: 40px; }}
-            h1 {{ margin-bottom: 10px; }}
-            img {{ margin-top: 20px; max-width: 100%; }}
-            table {{ border-collapse: collapse; }}
-            th, td {{ padding: 6px 8px; }}
-        </style>
-    </head>
-    <body>
-        <h1>Model Report: {m}</h1>
-
-        <h2>Timing</h2>
-        <p>Posterior Sampling: {times[0]:.2f} seconds</p>
-        <p>Log Likelihood Compute: {times[1]:.2f} seconds</p>
-    """)
-
-    # --- Summary ---
-    if show['summary']:
-        html_parts.append(f"""
-        <h2>Summary</h2>
-        {summary_html}
-        <h2>f Summary</h2>
-        {f_summary_html if f_summary_html is not None else ""}
-        <p>Divergences: {n_divergences} out of {total_samples} samples ({div_pct:.2f}%)</p>
-        """)
-
-    # --- Metrics ---
-    if show['metrics']:
-        html_parts.append(f"""
-        <h2>WAIC and PSIS LOO</h2>
-        {wl_html}
-        """)
-
-    # --- Trace ---
-    if show['trace']:
-        html_parts.append(f"""
-        <h2>Trace Plot</h2>
-        <img src="data:image/png;base64,{trace_img}">
-        """)
-
-    # --- Pair ---
-    if show['pair']:
-        html_parts.append(f"""
-        <h2>Pair Plot</h2>
-        <img src="data:image/png;base64,{pair_img}">
-        """)
-
-    # --- Spline ---
-    if show['spline']:
-        imgs = "".join(f'<img src="data:image/png;base64,{img}">' for img in spline_imgs)
-        html_parts.append(f"""
-        <h2>Spline Plot</h2>
-        {imgs}
-        """)
-
-    # --- Exponential Spline ---
-    if show['exp_spline']:
-        imgs = "".join(f'<img src="data:image/png;base64,{img}">' for img in exp_spline_imgs)
-        html_parts.append(f"""
-        <h2>Exponential Spline Plot</h2>
-        {imgs}
-        """)
-
-    # --- Link ---
-    if show['link']:
-        img_html = f'<img src="data:image/png;base64,{zi_img}">' if zi_img is not None else ""
-        html_parts.append(f"""
-        <h2>ZI link Plot</h2>
-        {img_html}
-        """)
-
-    # --- Link spline ---
-    if show['link_spline']:
-        img_html = f'<img src="data:image/png;base64,{zi_s_img}">' if zi_s_img is not None else ""
-        html_parts.append(f"""
-        <h2>ZI link with Spline Plot</h2>
-        {img_html}
-        """)
-
-    # --- Divergences ---
-    if show['divergences']:
-        img_html = (
-            f'<img src="data:image/png;base64,{div_img}">'
-            if n_divergences > 0
-            else "<p>No divergences detected.</p>"
-        )
-        html_parts.append(f"""
-        <h2>Divergences Plot</h2>
-        <p>Divergences: {n_divergences} out of {total_samples} samples ({div_pct:.2f}%)</p>
-        {img_html}
-        """)
-
-    # --- Footer ---
-    html_parts.append("""
-    </body>
-    </html>
-    """)
-
-    html_content = "".join(html_parts)
-
-    report_file = os.path.join(report_path, f"report_[{m}].html")
-    with open(report_file, "w") as f:
-        f.write(html_content)
-
-    print(f"Saved report to {report_file}")
-
-def create_html_report(model_folder, model_name, n_draws, reports_folder=None, title=None, replace=False, clear_images=False):
-    """
-    Generate HTML report for a single model.
-
-    Args:
-        model_folder: path to the model_name folder containing csv/images
-        model_name: name of the model
-        n_draws: number of draws for ESS coloring
-        reports_folder: if provided, also generate a report in this folder
-        title: optional HTML title
-        clear_images: if True, remove image files after generating the report
-    """
-
-    # Paths for output HTML files
-    out_files = [os.path.join(model_folder, f"report_[{model_name}].html")]
-    if reports_folder:
-        os.makedirs(reports_folder, exist_ok=True)
-        out_files.append(os.path.join(reports_folder, f"report_[{model_name}].html"))
-    # If not replacing, check if files exist
-    if not replace:
-        if all(os.path.exists(f) for f in out_files):
-            print(f"Skipping HTML report for {model_name}, report already exists.")
-            return
-
-    if title is None:
-        title = f"Model Report: {model_name}"
-
-    # --- Read CSVs ---
-    table_files = ["_model_timings.csv", "summary.csv", "_model_elpd_metrics.csv"]
-    csv_html_parts = []
-    for tfile in table_files:
-        tpath = os.path.join(model_folder, tfile)
-        if os.path.exists(tpath):
-            df = pd.read_csv(tpath)#.round(2)
-            # apply formatting only if relevant columns exist
-            int_cols = ["ess_bulk", "ess_tail", "waic_warning", "n_pareto_k_bad", "n_pareto_k_very_bad"]
-            fmt_dict = {c: "{:.2f}" for c in df.select_dtypes(include="number").columns if c not in int_cols}
-            for c in int_cols:
-                if c in df.columns:
-                    df[c] = df[c].astype(int)
-                    fmt_dict[c] = "{:d}"
-            # Apply styling for summary.csv
-            if tfile == "summary.csv":
-                df_html = (df.style.format(fmt_dict)
-                    .map(lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1.01 else "background-color: lightgreen;",
-                         subset=["r_hat"] if "r_hat" in df.columns else [])
-                    .map(lambda x: color_ess(x, n_draws),
-                         subset=["ess_bulk", "ess_tail"] if "ess_bulk" in df.columns else [])
-                    ).to_html()
-            elif tfile == "_model_elpd_metrics.csv":
-                df_html = (df.style.format(fmt_dict)
-                    .map(lambda x: "background-color: red;" if isinstance(x, (int, float)) and x >= 1 else "background-color: lightgreen;",
-                         subset=["waic_warning"] if "waic_warning" in df.columns else [])
-                    .map(lambda x: "background-color: red;" if isinstance(x, (int, float)) and x > 0 else "background-color: lightgreen;",
-                         subset=["n_pareto_k_bad", "n_pareto_k_very_bad"] if "n_pareto_k_bad" in df.columns else [])
-                    .map(lambda x: "background-color: yellow;", subset=["waic", "loo"] if "waic" in df.columns else [])
-                    ).to_html()
-            else:
-                df_html = df.to_html(index=False, escape=False, border=0)
-
-            csv_html_parts.append(f"<h2>{tfile}</h2>\n{df_html}")
-
-    # --- Images ---
-    img_files = []
-    # trace.png
-    trace_path = os.path.join(model_folder, "trace.png")
-    if os.path.exists(trace_path):
-        img_files.append(("Trace Plot", trace_path))
-    # khat.png
-    khat_path = os.path.join(model_folder, "khat.png")
-    if os.path.exists(khat_path):
-        img_files.append(("Pareto k Diagnostics", khat_path))
-    # spline_*.png
-    for sf in sorted([f for f in os.listdir(model_folder) if f.startswith("spline_") and f.endswith(".png")]):
-        sf_path = os.path.join(model_folder, sf)
-        img_files.append((sf, sf_path))
-
-    # --- Assemble HTML ---
-    html_base = [
-        f"<html><head><title>{title}</title>",
-        "<style>",
-        "body { font-family: Arial; font-size: 12px; line-height: 1.2; margin: 8px; text-align:center; }",
-        "h1, h2 { margin: 4px 0 8px 0; font-weight: normal; }",
-        "table { border-collapse: collapse; font-size: 15px; margin: 0 auto 12px auto; width: 80%; }",
-        "table th, table td { border: 1px solid #aaa; padding: 4px 6px; text-align: center; }",
-        "img { max-width: 80%; margin: 8px auto; display: block; }",
-        "</style></head><body>",
-        f"<h1>{title}</h1>"
-    ]
-    html_base.extend(csv_html_parts)
-    html_parts = html_base.copy()
-    # Add images as base64
-    for caption, path in img_files:
-        html_parts.append(f"<h2>{caption}</h2>")
-        with open(path, "rb") as img_file:
-            img_data = base64.b64encode(img_file.read()).decode('utf-8')
-            html_parts.append(f'<img src="data:image/png;base64,{img_data}" style="max-width:100%;">')
-    
-    html_parts.append("</body></html>")
-
-    # --- Write HTML files ---
-    for html_file in out_files:
-        with open(html_file, "w") as f:
-            f.write("\n".join(html_parts))
-
-    print(f"HTML reports written to: {', '.join(out_files)}")
-
-    if clear_images:
-        # remove images to save space
-        for _, path in img_files:
-            os.remove(path)

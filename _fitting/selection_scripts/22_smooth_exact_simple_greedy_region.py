@@ -8,7 +8,7 @@ import os
 import random
 from multiprocessing import Pool
 from _data.data_utils import read_in
-from _fitting.model_utils import data_settings_to_name, compare_models
+from _fitting.model_utils import data_settings_to_name, compare_models, loo_compare_models
 from _fitting.model_utils_smooth import *
 import arviz as az
 import pandas as pd
@@ -31,10 +31,52 @@ else:
     print('something wrong')
 
 ################################################################################
-data_settings = {'admin':2, 'max_lag':6, 'start_year':2016, 'start_month':1, 'end_year':2019, 'end_month':12}
+regions = [#'ACEH',
+           #'SUMATRA BARAT',
+           #'NUSA TENGGARA TIMUR',
+           #'SUMATRA UTARA',
+           #'PAPUA SELATAN',
+           'BALI',
+           #'KALIMANTAN SELATAN',
+           'JAWA BARAT',
+           #'SULAWESI TENGAH',
+           #'KEPULAUAN BANGKA BELITUNG',
+           'JAWA TIMUR',
+           'JAWA TENGAH',
+           #'SULAWESI SELATAN',
+           'DAERAH ISTIMEWA YOGYAKARTA',
+           #'SUMATRA SELATAN',
+           #'KALIMANTAN TENGAH',
+           #'JAMBI',
+           #'RIAU',
+           #'KALIMANTAN BARAT',
+           #'BENGKULU',
+           #'KALIMANTAN TIMUR',
+           #'PAPUA',
+           #'NUSA TENGGARA BARAT', 
+           #'KEPULAUAN RIAU', 
+           #'GORONTALO',
+           #'SULAWESI UTARA',
+           #'SULAWESI TENGGARA',
+           #'KALIMANTAN UTARA',
+           #'MALUKU',
+           #'PAPUA TENGAH',
+           #'PAPUA BARAT',
+           #'MALUKU UTARA',
+           #'PAPUA PEGUNUNGAN',
+           #'LAMPUNG',
+           'BANTEN',
+           'DKI JAKARTA',
+           #'PAPUA BARAT DAYA',
+           #'SULAWESI BARAT'
+
+]
+
+data_settings = {'admin':2, 'max_lag':6, 'start_year':2016, 'start_month':1, 'end_year':2018, 'end_month':12,
+                 'select_admin1_regions':regions}
 data_name = data_settings_to_name(data_settings)
 
-fitting_task = '20_smooth_exact_simple_adjusted_greedy_0_scaled_alpha'
+fitting_task = '22_smooth_exact_simple_greedy_0_region'
 
 ################################################################################
 
@@ -201,7 +243,7 @@ if __name__ == "__main__":
                 statistics_s1.remove(s)
 
             for stat_name in statistics_s1:
-                stat_names = s1 #+ [stat_name]
+                stat_names = s1 + [stat_name]
                 settings = {
                     'alpha_type': 'exponential', 'alpha_parameters': {'lam': 0.5},
                     'intercept_type': 'normal', 'intercept_parameters': {'mu': -10.0, 'sigma': 1.0},
@@ -292,7 +334,12 @@ if __name__ == "__main__":
     print("Model Comparison:")
     print("="*50)
     metric="loo"
-    comparison_df = compare_models(outpath, data_name, task=fitting_task, metric=metric)
+    #comparison_df = compare_models(outpath, data_name, task=fitting_task, metric=metric)
+    model_fits_dir = outpath
+    run_folders = [data_name + f'[{fitting_task}]']
+    models = tasks[0][0] if len(tasks) > 0 else []
+
+    comparison_df = loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, pointwise=False)
     
     # Save comparison results
     save_path = os.path.join(outpath, f'{data_name}[{fitting_task}]', f"model_comparison({metric}).csv")
@@ -300,5 +347,5 @@ if __name__ == "__main__":
     print(f"\nComparison saved to: {save_path}")
 
     elpd_metrics = pd.read_csv(os.path.join(outpath, f'{data_name}[{fitting_task}]', f"_model_elpd_metrics.csv"))
-    elpd_metrics = elpd_metrics.sort_values(by='loo', ascending=False).reset_index(drop=True)
+    elpd_metrics = elpd_metrics.sort_values(by='loo mean', ascending=False).reset_index(drop=True)
     elpd_metrics.to_csv(os.path.join(outpath, f'{data_name}[{fitting_task}]', f"_model_elpd_metrics.csv"), index=False)

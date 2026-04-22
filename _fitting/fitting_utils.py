@@ -11,6 +11,7 @@ from patsy import dmatrix
 ###
 from _fitting._utils_naming import abbrev_surveillance, abbrev_urbanisation, abbrev_stat
 ###
+
 def path_setup(outpath, data_name, task, model_name):
     if task is None:
         data_path = os.path.join(outpath, f'{data_name}/')
@@ -31,16 +32,45 @@ def path_setup(outpath, data_name, task, model_name):
     os.makedirs(output_path, exist_ok=True)
 
     return data_path, idata_path, report_path, metrics_path, output_path
+
+def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
+
+    loo_pointwise = eval_loo.loo_i.values
+    waic_pointwise = eval_waic.waic_i.values
+    return {
+        "model_name": model_name,
+        "data_name": data_name,
+
+        # LOO
+        "loo mean": float(np.mean(loo_pointwise)),
+        #"p_loo": float(eval_loo.p_loo),
+        "loo std": float(np.std(loo_pointwise)),
+        "loo_cv" : np.std(loo_pointwise) / np.abs(np.mean(loo_pointwise)),
+        "loo mean se": float(np.std(loo_pointwise)/np.sqrt(len(loo_pointwise))),
+
+        # diagnostics
+        "n_pareto_k_bad": int(np.sum(eval_loo.pareto_k>0.7)),
+        "n_pareto_k_very_bad": int(np.sum(eval_loo.pareto_k>1)),
+        "pareto_k_mean": float(eval_loo.pareto_k.mean()),
+
+        # WAIC
+        "waic mean": float(np.mean(waic_pointwise)),
+        #"p_waic": float(eval_waic.p_waic),
+        "waic std": float(np.std(waic_pointwise)),
+        "waic mean se": float(np.std(waic_pointwise)/np.sqrt(len(waic_pointwise))),
+        "waic_cv" : np.std(waic_pointwise) / np.abs(np.mean(waic_pointwise)),
+        "waic_warning": int(eval_waic.warning),
+    }
 ###
 
 def hist_plot(idata, figsize=(9,5), root=True):
     # comparing observed and predicted histograms
     fig, ax = plt.subplots(figsize=figsize)
-    # az.plot_ppc(idata, ax=ax)
-    # Adjust histogram bins
     ax.clear()
+
     obs = idata.observed_data['y_obs'].values
     ppc = idata.posterior_predictive['y_obs'].values.flatten()
+
     ax.hist(ppc, bins=np.concat([np.arange(20), np.arange(20,100, 5), np.arange(100, 300, 20)]), alpha=0.3, density=True, label='Predicted')
     ax.hist(obs, bins=np.concat([np.arange(20), np.arange(20,100, 5), np.arange(100, 300, 20)]), alpha=0.3, density=True, label='Observed')
     ax.set_xbound(lower=None, upper=200)
@@ -49,8 +79,8 @@ def hist_plot(idata, figsize=(9,5), root=True):
     ax.legend()
 
 def hist_plot_contrast(idata, figsize=(9, 5), root=True):
-
     fig, ax = plt.subplots(figsize=figsize)
+    ax.clear()
 
     obs = idata.observed_data["y_obs"].values
     ppc = idata.posterior_predictive["y_obs"].values.flatten()
@@ -71,26 +101,20 @@ def hist_plot_contrast(idata, figsize=(9, 5), root=True):
     ppc_only = ppc_hist - overlap
 
     # Plot overlap
-    ax.bar(
-        bin_centers, overlap,
-        width=np.diff(bins),
-        color="purple", alpha=0.5, label="Overlap"
-    )
+    ax.bar(bin_centers, overlap,
+           width=np.diff(bins),
+           color="purple", alpha=0.5, label="Overlap")
 
     # Plot non-overlapping parts
-    ax.bar(
-        bin_centers, obs_only,
-        bottom=overlap,
-        width=np.diff(bins),
-        color="black", alpha=1, label="Observed only"
-    )
+    ax.bar(bin_centers, obs_only,
+           bottom=overlap,
+           width=np.diff(bins),
+           color="black", alpha=1, label="Observed only")
 
-    ax.bar(
-        bin_centers, ppc_only,
-        bottom=overlap,
-        width=np.diff(bins),
-        color="red", alpha=1, label="Predicted only"
-    )
+    ax.bar(bin_centers, ppc_only,
+           bottom=overlap,
+           width=np.diff(bins),
+           color="red", alpha=1, label="Predicted only")
 
     ax.set_xbound(lower=None, upper=200)
 
