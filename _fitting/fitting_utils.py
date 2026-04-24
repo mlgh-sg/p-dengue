@@ -35,7 +35,11 @@ def path_setup(outpath, data_name, task, model_name):
 
 def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
 
-    loo_pointwise = eval_loo.loo_i.values
+    extra_fit = False
+    if hasattr(eval_loo, 'influence_pareto_k'):
+        extra_fit = True
+
+    loo_pointwise = eval_loo.loo_i.values if hasattr(eval_loo, 'loo_i') else eval_loo.elpd_i.values
     waic_pointwise = eval_waic.waic_i.values
     return {
         "model_name": model_name,
@@ -45,10 +49,11 @@ def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
         "loo mean": float(np.mean(loo_pointwise)),
         #"p_loo": float(eval_loo.p_loo),
         "loo std": float(np.std(loo_pointwise)),
-        "loo_cv" : np.std(loo_pointwise) / np.abs(np.mean(loo_pointwise)),
+        # "loo_cv" : np.std(loo_pointwise) / np.abs(np.mean(loo_pointwise)),
         "loo mean se": float(np.std(loo_pointwise)/np.sqrt(len(loo_pointwise))),
 
         # diagnostics
+        "extra_fit": int(extra_fit),
         "n_pareto_k_bad": int(np.sum(eval_loo.pareto_k>0.7)),
         "n_pareto_k_very_bad": int(np.sum(eval_loo.pareto_k>1)),
         "pareto_k_mean": float(eval_loo.pareto_k.mean()),
@@ -58,7 +63,7 @@ def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
         #"p_waic": float(eval_waic.p_waic),
         "waic std": float(np.std(waic_pointwise)),
         "waic mean se": float(np.std(waic_pointwise)/np.sqrt(len(waic_pointwise))),
-        "waic_cv" : np.std(waic_pointwise) / np.abs(np.mean(waic_pointwise)),
+        # "waic_cv" : np.std(waic_pointwise) / np.abs(np.mean(waic_pointwise)),
         "waic_warning": int(eval_waic.warning),
     }
 ###

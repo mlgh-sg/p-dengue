@@ -7,10 +7,22 @@ if GPU:
     import subprocess, os; os.environ["CUDA_VISIBLE_DEVICES"] = str(max([(int(l.split(',')[0]), int(l.split(',')[1])) for l in subprocess.run(['nvidia-smi', '--query-gpu=index,memory.free', '--format=csv,nounits,noheader'], capture_output=True, text=True).stdout.strip().split('\n')], key=lambda x: x[1])[0])
     os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
+from copyreg import pickle
+
+import pickle
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+
+# if using uv env for CPU
+#if CPU:
+    #import pytensor
+    # pytensor.config.mode='NUMBA'
+import pytensor
+import pytensor.tensor as pt
+
 import pymc as pm
 import pymc.math as pmm
 import arviz as az
@@ -24,12 +36,9 @@ import base64
 import re
 import xarray as xr
 
-# if using uv env for CPU
-if CPU:
-    import pytensor
-    pytensor.config.mode='NUMBA'
 
-import pytensor.tensor as pt
+
+
 from scipy.sparse.linalg import eigsh
 az.style.use("arviz-darkgrid")
 import warnings
@@ -672,8 +681,9 @@ def go(data, m, model_dict, idata_dict, time_dict, B_dict,
     
     return model_dict[m], B_dict[m], knot_list_dict[m], stat_names_dict[m], var_names_dict[m], link_dict[m], idata_dict[m], time_dict[m], n_divergences_dict[m]
 
+###
 def time_models(model_dict, idata_dict, models_list, iter):
-    # Compare models
+    # time models
     times = {m: [] for m in models_list}
     for m in models_list:
         for i in range(iter):
@@ -708,6 +718,7 @@ def time_models_parallel(model_dict, idata_dict, models_list, iter, n_workers=4)
         times[m] = t
         mean_times[m] = mt
     return times, mean_times
+###
 
 def build_var_names(alpha_parameters, intercept_parameters, link, link_type,
                     b1_parameters, c_parameters, stat_names, spline_implementation,
@@ -1612,7 +1623,10 @@ def fit_sig_spline_p_model(data, data_name,
                            model_builder='build_sig_spline_p_model',
                            show = {'summary': True, 'trace': True, 'pair': True, 'metrics': True,
                             'spline': True, 'exp_spline': True, 'link': True, 'link_spline': True,
-                            'divergences': True}):
+                            'divergences': True},
+                           moment_match=True,
+                           exact_loo=True,
+                           remove_temp_files=False):
     
     V_r_dict = None
     if model_builder == 'build_sig_spline_p_model':
@@ -1623,6 +1637,9 @@ def fit_sig_spline_p_model(data, data_name,
         model_name = m  
     if model_builder == 'build_model_exact_mult_stat':
         model, m, B, V_r_dict, knot_list = build_model_exact_mult_stat(data.copy(), **model_settings)
+        model_name = m
+    if model_builder == 'build_model_exact_mult_stat_mm':
+        model, m, B, V_r_dict, knot_list, log_prob_upars_fn, log_lik_i_upars_fn, uparam_names = build_model_exact_mult_stat_mm(data.copy(), **model_settings)
         model_name = m
 
     var_names = build_var_names(model_settings['alpha_parameters'], model_settings['intercept_parameters'], model_settings['link'], model_settings['link_type'],
@@ -1652,10 +1669,6 @@ def fit_sig_spline_p_model(data, data_name,
             if "log_likelihood" not in idata.groups():
                 print(f"Log likelihood missing, recomputing...")
                 pm.compute_log_likelihood(idata, progressbar=False)
-                # tmp_file = os.path.join(idata_path, f"temp_idata_[{model_name}].nc")
-                # idata_thinned = idata.sel(draw=slice(None, None, 12))
-                # idata_thinned.to_netcdf(tmp_file)
-                # os.replace(tmp_file, idata_file)  # atomic replace
                 idata.to_netcdf(idata_file)
                 print('saved idata to', idata_file)
                 times = (0.0, 0.0)
@@ -1676,11 +1689,7 @@ def fit_sig_spline_p_model(data, data_name,
 
             s0 = time.time()
 
-            if GPU==True and CPU==True:
-                print("Warning: Both GPU and CPU = True")
-            elif GPU==False and CPU==False:
-                print("Warning: Both GPU and CPU = False")
-            elif GPU:
+            if GPU:
                 nuts_sampler_kwargs = {"max_energy_error": max_energy_error, 'backend': 'jax', 'gradient_backend': 'jax'}
             elif CPU:
                 nuts_sampler_kwargs = {"max_energy_error": max_energy_error}
@@ -1709,7 +1718,7 @@ def fit_sig_spline_p_model(data, data_name,
             with open(os.path.join(output_path, "times.txt"), "w") as f:
                 f.write(f"{times[0]}\n{times[1]}\n")
             # Save inference data
-            idata_thinned = idata.sel(draw=slice(None, None, 8))
+            idata_thinned = idata.sel(draw=slice(None, None, None))
             idata_thinned.to_netcdf(idata_file)
             print('saved idata to', idata_file)
             print(f'\nPosterior Sampling {s1 - s0:.2f} seconds')
@@ -1741,32 +1750,157 @@ def fit_sig_spline_p_model(data, data_name,
 
     # Save pointwise values for later comparison
     pointwise_file = os.path.join(metrics_path, f"_metrics[{model_name}].npz")
+    pointwise_file_temp = os.path.join(metrics_path, f"_metrics[{model_name}]_temp.pkl")
+    pointwise_file_temp_mm = os.path.join(metrics_path, f"_metrics[{model_name}]_temp_mm.pkl")
     if os.path.exists(pointwise_file):
         print(f"Skipping {model_name} metrics compute, already exists.")
         wl_df = pd.read_csv(os.path.join(output_path, "_model_elpd_metrics.csv"))
     else:
-        #### WAIC and PSIS LOO
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            eval_waic = az.waic(idata, pointwise=True)
-            eval_psis_loo_elpd = az.loo(idata, pointwise=True)
-        #np.savez(
-            #pointwise_file,
-            #waic_pointwise=eval_waic.waic_i.values,
-            #loo_pointwise=eval_psis_loo_elpd.loo_i.values,
-            #pareto_k=eval_psis_loo_elpd.pareto_k.values
-        #)
+        from arviz_stats.loo import loo, loo_moment_match
+        if os.path.exists(pointwise_file_temp):
+            with open(pointwise_file_temp, "rb") as f:
+                m_temp = pickle.load(f)
+
+            eval_psis_loo_elpd = m_temp["loo"]
+            eval_waic = m_temp["waic"]
+            good_k = eval_psis_loo_elpd.good_k
+        else:
+            #### WAIC and PSIS LOO
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                eval_waic = az.waic(idata, pointwise=True)
+                eval_psis_loo_elpd = loo(idata, pointwise=True)
+                good_k = eval_psis_loo_elpd.good_k
+            with open(pointwise_file_temp, "wb") as f:
+                pickle.dump({
+                    "loo": eval_psis_loo_elpd,
+                    "waic": eval_waic
+                }, f)
+        
+        if (model_builder == 'build_model_exact_mult_stat_mm')&(moment_match==True):
+            if os.path.exists(pointwise_file_temp_mm):
+                with open(pointwise_file_temp_mm, "rb") as f:
+                    m_temp_mm = pickle.load(f)
+
+                eval_psis_loo_elpd = m_temp_mm["loo"]
+                eval_waic = m_temp_mm["waic"]
+                # n_bad_k_mm = (eval_psis_loo_elpd.pareto_k.values > good_k).sum()
+                # print(f"Loaded moment matching results, bad k remaining: {n_bad_k_mm}")
+            else:
+                n_bad_k = (eval_psis_loo_elpd.pareto_k.values > good_k).sum()
+                if n_bad_k > 0:
+                    print(f"Found {n_bad_k} bad Pareto-k values, running moment matching...")
+                    
+                    # build upars from posterior
+                    posterior = idata.posterior
+                    log_transformed = ['alpha']
+                    upars = build_upars(idata, uparam_names, log_transformed=log_transformed)
+                    
+                    eval_psis_loo_elpd = loo_moment_match(
+                        idata,
+                        loo_orig=eval_psis_loo_elpd,
+                        log_prob_upars_fn=log_prob_upars_fn,
+                        log_lik_i_upars_fn=log_lik_i_upars_fn,
+                        upars=upars,
+                        k_threshold=good_k,
+                        pointwise=True,
+                        #max_iters=1
+                    )
+                    print(f"Moment matching complete. Bad k remaining: "
+                        f"{(eval_psis_loo_elpd.pareto_k.values > good_k).sum()}")
+                    with open(pointwise_file_temp_mm, "wb") as f:
+                        pickle.dump({
+                            "loo": eval_psis_loo_elpd,
+                            "waic": eval_waic
+                        }, f)
+
+            good_k_mm = eval_psis_loo_elpd.good_k
+            n_bad_k_remaining = (eval_psis_loo_elpd.pareto_k.values > good_k_mm).sum()
+            print(f"Moment matching complete. Bad k remaining: {n_bad_k_remaining}")
+                
+            # reloo for any still-bad observations
+            if (n_bad_k_remaining > 0) & (exact_loo):
+                print(f"Running exact reloo for {n_bad_k_remaining} remaining bad k...")
+                bad_idx = np.where(eval_psis_loo_elpd.pareto_k.values > good_k_mm)[0]
+                
+                loo_i = eval_psis_loo_elpd.elpd_i.values.copy()  # or elpd_i depending on your version
+                
+                for i in bad_idx:
+                    # refit model without observation i
+                    print(eval_psis_loo_elpd.pareto_k.values[i], eval_psis_loo_elpd.elpd_i.values[i])
+                    data_loo = data.drop(index=data.index[i]).reset_index(drop=True)
+                    model_loo, _, _, _, _, log_prob_fn_loo, log_lik_i_fn_loo, uparam_names_loo = \
+                        build_model_exact_mult_stat_mm(data_loo.copy(), **model_settings)
+                    
+                    with model_loo:
+                        target_accept = 0.8
+                        max_treedepth = 10
+                        max_energy_error = 1000
+                        if GPU:
+                            nuts_sampler_kwargs = {"max_energy_error": max_energy_error, 'backend': 'jax', 'gradient_backend': 'jax'}
+                        elif CPU:
+                            nuts_sampler_kwargs = {"max_energy_error": max_energy_error}
+                        idata_loo = pm.sample(
+                            tune=100,#n_tune,
+                            draws=100,#n_draws,
+                            chains=n_chains,
+                            cores=n_chains,
+                            discard_tuned_samples=True,
+                            store_divergences=True,
+                            nuts_sampler="nutpie",
+                            target_accept = target_accept,
+                            max_treedepth = max_treedepth,
+                            nuts_sampler_kwargs=nuts_sampler_kwargs,
+                            progressbar=True
+                        )
+                    
+                    upars_loo = build_upars(idata_loo, uparam_names_loo, log_transformed=['alpha'])
+                    log_lik_i = log_lik_i_upars_fn(upars_loo, i)  # (chain, draw)
+                    
+                    # log mean exp over all draws = exact LOO for this point
+                    lv = log_lik_i.values.ravel()
+                    c = lv.max()
+                    loo_i[i] = c + np.log(np.mean(np.exp(lv - c)))
+                    eval_psis_loo_elpd.pareto_k.values[i] = 0.0
+                    print(f"  obs {i}: exact loo = {loo_i[i]:.3f}")
+                
+                # patch the total
+                eval_psis_loo_elpd.elpd_i.values[:] = loo_i
+                # recompute total elpd
+                eval_psis_loo_elpd.elpd_loo = loo_i.sum()
+                eval_psis_loo_elpd.se = np.sqrt(len(loo_i) * np.var(loo_i))
+                print("Exact reloo complete.")
+
+        if remove_temp_files:
+            if os.path.exists(pointwise_file_temp):
+                os.remove(pointwise_file_temp)
+            if os.path.exists(pointwise_file_temp_mm):
+                os.remove(pointwise_file_temp_mm)
+        # ----
+        if hasattr(eval_psis_loo_elpd, 'influence_pareto_k'):
+            print('found extra')
+        else:
+            print('missing')
         np.savez(
             pointwise_file,
-            loo_elpd_loo = eval_psis_loo_elpd.elpd_loo,
+            loo_elpd_loo = eval_psis_loo_elpd.elpd_loo if hasattr(eval_psis_loo_elpd, 'elpd_loo') else eval_psis_loo_elpd.elpd,
             loo_se = eval_psis_loo_elpd.se,
-            loo_p_loo = eval_psis_loo_elpd.p_loo,
+            loo_p_loo = eval_psis_loo_elpd.p_loo if hasattr(eval_psis_loo_elpd, 'p_loo') else eval_psis_loo_elpd.p,
             loo_n_samples = eval_psis_loo_elpd.n_samples,
             loo_n_data_points = eval_psis_loo_elpd.n_data_points,
             loo_warning = eval_psis_loo_elpd.warning,
 
-            loo_pointwise=eval_psis_loo_elpd.loo_i.values,
+            loo_good_k = eval_psis_loo_elpd.good_k,
+
+            loo_pointwise = eval_psis_loo_elpd.loo_i.values if hasattr(eval_psis_loo_elpd, 'loo_i') else eval_psis_loo_elpd.elpd_i.values,
             pareto_k=eval_psis_loo_elpd.pareto_k.values,
+
+            **({'influence_pareto_k': eval_psis_loo_elpd.influence_pareto_k.values}
+                if hasattr(eval_psis_loo_elpd, 'influence_pareto_k') 
+                and eval_psis_loo_elpd.influence_pareto_k is not None else {}),
+            **({'n_eff_i': eval_psis_loo_elpd.n_eff_i.values}
+                if hasattr(eval_psis_loo_elpd, 'n_eff_i') 
+                and eval_psis_loo_elpd.n_eff_i is not None else {}),
 
             waic_elpd_waic = eval_waic.elpd_waic,
             waic_se = eval_waic.se,
@@ -2029,3 +2163,635 @@ def fit_sig_spline_p_model(data, data_name,
         # delete nc file to save space
         os.remove(idata_file)
     return
+
+
+###
+import scipy
+import time
+
+def build_upars(idata, uparam_names, log_transformed=None):
+    """
+    log_transformed: set of base parameter names that PyMC stores log-transformed
+                     e.g. {'alpha'} for Exponential/Gamma priors
+    """
+    if log_transformed is None:
+        log_transformed = []
+    
+    posterior = idata.posterior
+    arrays = []
+    for name in uparam_names:
+        if '[' in name:
+            base = name[:name.index('[')]
+            idx = int(name[name.index('[')+1:name.index(']')])
+            dim_name = [d for d in posterior[base].dims 
+                        if d not in ('chain', 'draw')][0]
+            arr = posterior[base].isel({dim_name: idx}).drop_vars(dim_name, errors='ignore')
+        else:
+            base = name
+            arr = posterior[name]
+        
+        # apply log transform for positive-constrained parameters
+        if base in log_transformed:
+            arr = np.log(arr)
+        
+        arrays.append(arr.expand_dims({'uparam': [name]}))
+    
+    return xr.concat(arrays, dim='uparam').transpose('chain', 'draw', 'uparam')
+
+def nb_logpmf_(y, mu, alpha):
+    # PyMC parameterisation: alpha is the dispersion
+    r = alpha
+    if len(mu.shape)==3:
+        r = np.broadcast_to(r[:, :, np.newaxis], mu.shape)
+
+    p = r / (r + mu)
+    # Negative binomial log-PMF manually
+    return (scipy.special.gammaln(r + y)
+            - scipy.special.gammaln(r)
+            - scipy.special.gammaln(y + 1)
+            + r * np.log(p)
+            + y * np.log1p(-p))
+    #return scipy.stats.nbinom.logpmf(y, n=r, p=p)
+
+def nb_logpmf(y, log_mu, alpha):
+    log_mu_val = log_mu  # don't exp it
+    r = alpha
+    if len(log_mu_val.shape)==3:
+        r = np.broadcast_to(r[:, :, np.newaxis], log_mu_val.shape)
+    # in nb_logpmf, replace mu with exp(log_mu):
+    # p = r / (r + exp(log_mu)) — use log-sum-exp trick
+    log_r = np.log(alpha)
+    log_p = log_r - np.logaddexp(log_r, log_mu)      # log(r/(r+mu))
+    log_1mp = log_mu - np.logaddexp(log_r, log_mu)   # log(mu/(r+mu))
+    return scipy.special.gammaln(r+y) - scipy.special.gammaln(r) - scipy.special.gammaln(y+1) + r*log_p + y*log_1mp
+
+from numba import njit, prange
+# from numba import set_num_threads, get_num_threads
+#set_num_threads(32) 
+# print(get_num_threads())
+import math
+
+@njit(parallel=True)
+def _nb_logpmf_sum_numba(y, log_mu, alpha_val, log_factorial_y):
+    # log_mu:         (n_draws, n_data)
+    # alpha_val:      (n_draws,)
+    # log_factorial_y:(n_data,)  precomputed gammaln(y+1)
+    # returns:        (n_draws,)
+    n_draws, n_data = log_mu.shape
+    out = np.zeros(n_draws)
+    for i in prange(n_draws):
+        r = alpha_val[i]
+        log_r = np.log(r)
+        # log_p = log_r - np.logaddexp(log_r, log_mu)      # log(r/(r+mu))
+        # log_1mp = log_mu - np.logaddexp(log_r, log_mu)   # log(mu/(r+mu))
+
+        #r = alpha_val[i] 
+        lgam_r = math.lgamma(r)
+        acc = 0.0
+
+        for j in range(n_data):
+            log_mu_ij = log_mu[i, j]
+            log_sum_r_mu = math.log(r + math.exp(log_mu_ij))
+            log_p = log_r - log_sum_r_mu    
+            log_1mp = log_mu_ij - log_sum_r_mu
+            # mu = math.exp(log_mu[i, j])
+            # p = r / (r + mu)
+            acc += (math.lgamma(r + y[j])
+                    - lgam_r
+                    - log_factorial_y[j]
+                    + r * log_p #math.log(p)
+                    + y[j] * log_1mp)# math.log1p(-p))
+        out[i] = acc
+    return out
+
+
+def nb_logpmf_chunked(y, log_mu, alpha_val, log_factorial_y):
+    n_chains, n_draws, n_data = log_mu.shape
+    
+    # flatten chain+draw into one dimension
+    log_mu_flat   = np.ascontiguousarray(log_mu.reshape(-1, n_data))   # (16000, 24000)
+    alpha_flat    = np.ascontiguousarray(alpha_val.reshape(-1))         # (16000,)
+    
+    result = _nb_logpmf_sum_numba(
+        y.astype(np.float64),
+        log_mu_flat,
+        alpha_flat,
+        log_factorial_y
+    )
+    
+    return result.reshape(n_chains, n_draws)
+
+def build_model_exact_mult_stat_mm_(data,
+                             alpha_type, alpha_parameters,
+                             intercept_type, intercept_parameters,
+                             beta_u_type, beta_u_parameters,
+                             link, link_stat_name, link_type,
+                             b1_type, b1_parameters,
+                             c_type, c_parameters,
+                             stat_names, num_knots, knot_type, degree,
+                             spline_implementation, spline_type, spline_parameters,
+                             penalty_order, penalty_type, penalty_parameters, penalty_std,
+                             cutoff, 
+                             exclude=None,
+                             surveillance_name=None,
+                             urbanisation_name='urbanisation_pop_weighted_std'):
+
+    m = build_model_name_mult_stat(alpha_type, alpha_parameters,
+                        intercept_type, intercept_parameters,
+                        link, link_stat_name, link_type,
+                        b1_type, b1_parameters,
+                        c_type, c_parameters,
+                        stat_names, num_knots, knot_type, degree,
+                        spline_implementation, spline_type, spline_parameters,
+                        penalty_order, penalty_type, penalty_parameters, penalty_std,
+                        cutoff, beta_u_type, beta_u_parameters,
+                        exclude=exclude)
+    
+    # ----
+    log_prob_terms = []   # list of callables, (upars) -> (chain, draw)
+    mu_spline_terms_i = []    # list of callables, (upars, i) -> (chain, draw)
+    mu_spline_terms_all = []    # list of callables, (upars) -> (chain, draw, n_data)
+    uparam_names = []     # track parameter names in order
+    # ----
+
+    model = pm.Model()
+    with model:
+        # Priors
+        if alpha_type == 'exponential':
+            alpha = pm.Exponential("alpha", lam=alpha_parameters['lam'])
+            # ----
+            uparam_names.append('alpha')
+            lam = alpha_parameters['lam']
+            def _log_prior_alpha(upars, lam=lam):
+                # alpha is positive so PyMC stores log(alpha) as unconstrained
+                log_alpha = upars.sel(uparam='alpha').values
+                alpha_val = np.exp(log_alpha)
+                # log p(alpha) + log|jacobian| for log transform
+                return log_alpha + scipy.stats.expon.logpdf(alpha_val, scale=1/lam)
+            log_prob_terms.append(_log_prior_alpha)
+            # ----
+        elif alpha_type == 'gamma':
+            alpha = pm.Gamma("alpha", alpha=alpha_parameters['a'], beta=alpha_parameters['b'])
+            # ----
+            raise NotImplementedError('alpha gamma moment matching not implemented')
+            # ----
+
+        if intercept_type == 'normal':
+            intercept = pm.Normal("intercept", mu=intercept_parameters['mu'], sigma=intercept_parameters['sigma'])
+            # ----
+            uparam_names.append('intercept')
+            mu_i = intercept_parameters['mu']
+            sigma_i = intercept_parameters['sigma']
+            def _log_prior_intercept(upars, mu=mu_i, sigma=sigma_i):
+                v = upars.sel(uparam='intercept').values
+                return scipy.stats.norm.logpdf(v, loc=mu, scale=sigma)
+            log_prob_terms.append(_log_prior_intercept)
+            # ----
+        if urbanisation_name is not None:
+            beta_u = pm.Normal("beta_u", mu=beta_u_parameters['mu'], sigma=beta_u_parameters['sigma'])
+            # ----
+            uparam_names.append('beta_u')
+            mu_u = beta_u_parameters['mu']
+            sigma_u = beta_u_parameters['sigma']
+            def _log_prior_beta_u(upars, mu=mu_u, sigma=sigma_u):
+                v = upars.sel(uparam='beta_u').values
+                return scipy.stats.norm.logpdf(v, loc=mu, scale=sigma)
+            log_prob_terms.append(_log_prior_beta_u)
+            # ----
+
+        # splines
+        B = None
+        knot_list = None
+        V_r_dict = None
+        if stat_names is not None:
+            knot_list = {}
+            V_r_dict = {}
+            B = {}
+            sigma_w = {}
+            w = {}
+            f = {}
+            for stat_name in stat_names:
+                d = data[stat_name].values
+                # d = np.clip(d, np.percentile(d, 0.1), np.percentile(d, 99.9))
+
+                B_full, _, _, knot_list[stat_name] = eval_spline_basis_equispaced_numeric(degree, np.min(d), np.max(d), num_knots[stat_name], d).values()
+
+                if spline_implementation == 'svd':
+                    B_full_centred = B_full - B_full.mean(axis=0)  # centre the spline basis functions
+                    U, S, Vt = np.linalg.svd(B_full_centred, full_matrices=False)
+                    k = len(S)
+                    r = np.sum(S > 1e-10)
+                    U_r = U[:, :r]
+                    S_r = S[:r]
+                    Vt_r = Vt[:r, :]
+                    V_r = np.ascontiguousarray(Vt_r.T)
+                    V_r_dict[stat_name] = V_r
+                    X_r = U_r @ np.diag(S_r)
+                    X_r = np.ascontiguousarray(X_r)  # ensure X_r is C-contiguous for PyMC
+                    B[stat_name] = X_r
+
+                    # Spline coefficients
+                    if spline_type == 'halfnormal':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfNormal(f"sigma_w({stat_name})", sigma=spline_parameters['sigma_w_sigma'])
+                    elif spline_type == 'halfstudentt':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfStudentT(f"sigma_w({stat_name})", nu=spline_parameters['sigma_w_nu'], sigma=spline_parameters['sigma_w_sigma'])
+                    w[stat_name] = pm.Normal(f"w({stat_name})", mu=0, sigma=sigma_w[stat_name], size=B[stat_name].shape[1], dims=f"splines_{stat_name}")
+
+                    f[stat_name] = pm.math.dot(B[stat_name], w[stat_name])
+
+                    if penalty_order is not None:
+                        if penalty_type == 'halfnormal':
+                            h = (np.max(d) - np.min(d)) / (num_knots[stat_name] + 1)
+                            p = pm.Deterministic(f'p({stat_name})', pt.as_tensor_variable(penalty_parameters['p'][stat_name]))
+                        
+                        if penalty_std:
+                            raise ValueError("penalty_std=True is not allowed")
+                        else:
+                            D2 = difference_matrix(k, order=2)        # (k-2, k)
+                            D2V = np.ascontiguousarray(D2 @ V_r)        # (k-2, k)(k, r) = (k-2, r)
+                            D2V_pt = pt.as_tensor_variable(D2V)
+                            D2Vw = pt.dot(D2V_pt, w[stat_name])
+                            int_f_dd_sq = (1 / (3 * h**3)) * (
+                                            D2Vw[0]**2
+                                            + 2 * pt.sum(D2Vw[1:-1]**2)
+                                            + D2Vw[-1]**2
+                                            + pt.sum(D2Vw[:-1] * D2Vw[1:])
+                                        )
+                            pm.Potential(f"spline_penalty({stat_name})", (-pt.log(p) -1/2*int_f_dd_sq/p**2) * r)
+                            pen = pm.Deterministic(f"pen({stat_name})", (-pt.log(p) -1/2*int_f_dd_sq/p**2))
+                    
+                uparam_names.extend([f'w({stat_name})[{j}]' for j in range(r)])
+                # ----
+                # capture loop variable
+                _sn = stat_name
+                _r = r
+                _B = X_r.copy()
+                _V_r = V_r.copy()
+                _D2V = D2V.copy()
+                _p_val = penalty_parameters['p'][stat_name]
+                _h = h
+                _sigma_w = 10.0  # since it's Deterministic
+
+                def _log_prior_spline(upars, sn=_sn, r=_r, sigma_w=_sigma_w,
+                                    D2V=_D2V, p=_p_val, h=_h):
+                    w_keys = [f'w({sn})[{j}]' for j in range(r)]
+                    # w_vals = np.stack([upars.sel(uparam=k).values for k in w_keys], axis=-1)
+                    w_vals = upars.sel(uparam=w_keys).values
+                    # Normal prior on w
+                    log_p = scipy.stats.norm.logpdf(w_vals, loc=0, scale=sigma_w).sum(axis=-1)
+                    # Penalty potential
+                    D2Vw = w_vals @ D2V.T   # (..., k-2)
+                    int_f_dd_sq = (1 / (3 * h**3)) * (
+                        D2Vw[..., 0]**2
+                        + 2 * np.sum(D2Vw[..., 1:-1]**2, axis=-1)
+                        + D2Vw[..., -1]**2
+                        + np.sum(D2Vw[..., :-1] * D2Vw[..., 1:], axis=-1)
+                    )
+                    log_penalty = (-np.log(p) - 0.5 * int_f_dd_sq / p**2) * r
+                    return log_p + log_penalty
+                log_prob_terms.append(_log_prior_spline)
+
+                def _mu_spline_term_i(upars, i, sn=_sn, r=_r, B=_B):
+                    w_keys = [f'w({sn})[{j}]' for j in range(r)]
+                    # w_vals = np.stack([upars.sel(uparam=k).values for k in w_keys], axis=-1)
+                    w_vals = upars.sel(uparam=w_keys).values
+                    return w_vals @ B[i]   # (chain, draw) contribution to log_mu
+                mu_spline_terms_i.append(_mu_spline_term_i)
+
+                def _mu_spline_term_all(upars, sn=_sn, r=_r, B=_B):
+                    w_keys = [f'w({sn})[{j}]' for j in range(r)]
+                    # w_vals = np.stack([upars.sel(uparam=k).values for k in w_keys], axis=-1)
+                    w_vals = upars.sel(uparam=w_keys).values
+                    return w_vals @ B.T   # (chain, draw, r) @ (r, n_obs) -> (chain, draw, n_obs)
+                mu_spline_terms_all.append(_mu_spline_term_all)
+                # ----
+
+
+        # Link
+        log_mu = intercept + pm.math.log(data['population'])
+        surveillance_name = None
+        if surveillance_name is not None:
+            log_mu += pm.math.log(pm.math.max(data[surveillance_name], pm.math.log(1e-3)))
+        if urbanisation_name is not None:
+            log_mu += beta_u*data[urbanisation_name]
+        if stat_names is not None:
+            for stat_name in stat_names:
+                log_mu += f[stat_name]
+
+        # Zero-inflation component
+        if link is None:
+            y_obs = pm.NegativeBinomial('y_obs', mu=pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
+        else:
+            raise ValueError("link is not allowed for this model")
+
+    m = m[:200]
+    
+    y = data['cases'].values
+    pop = data['population'].values
+    urban = data[urbanisation_name].values if urbanisation_name else None
+
+    def log_prob_upars_fn(upars):
+        prior_total = sum(fn(upars) for fn in log_prob_terms)
+
+        intercept_val = upars.sel(uparam='intercept').values
+        log_alpha = upars.sel(uparam='alpha').values
+        alpha_val = np.exp(log_alpha)
+        beta_u_val = upars.sel(uparam='beta_u').values if urbanisation_name else 0.0
+
+        log_mu = intercept_val[:, :, np.newaxis] + np.log(pop)
+        # log_mu = np.einsum('ij,l->ijl', intercept_val, np.ones_like(np.log(pop))) + np.log(pop)
+        if urban is not None:
+            log_mu += beta_u_val[:, :, np.newaxis] * urban
+            # log_mu += np.einsum('ij,l->ijl', beta_u_val, urban)
+        for fn in mu_spline_terms_all:
+            log_mu += fn(upars)
+
+        log_lik = nb_logpmf(y, log_mu=log_mu, alpha=alpha_val)
+
+        total = prior_total + log_lik.sum(axis=-1)  # sum over data points to get total log likelihood
+        return xr.DataArray(total, dims=['chain', 'draw'])
+
+    def log_lik_i_upars_fn(upars, i):
+        intercept_val = upars.sel(uparam='intercept').values
+        log_alpha = upars.sel(uparam='alpha').values
+        alpha_val = np.exp(log_alpha)
+        beta_u_val = upars.sel(uparam='beta_u').values if urbanisation_name else 0.0
+
+        log_mu_i = intercept_val + np.log(pop[i])
+        if urban is not None:
+            log_mu_i += beta_u_val * urban[i]
+        for fn in mu_spline_terms_i:
+            log_mu_i += fn(upars, i)
+
+        log_lik = nb_logpmf(y[i], log_mu=log_mu_i, alpha=alpha_val)
+        return xr.DataArray(log_lik, dims=['chain', 'draw'])
+    
+    return model, m, B, V_r_dict, knot_list, log_prob_upars_fn, log_lik_i_upars_fn, uparam_names
+
+def build_model_exact_mult_stat_mm(data,
+                             alpha_type, alpha_parameters,
+                             intercept_type, intercept_parameters,
+                             beta_u_type, beta_u_parameters,
+                             link, link_stat_name, link_type,
+                             b1_type, b1_parameters,
+                             c_type, c_parameters,
+                             stat_names, num_knots, knot_type, degree,
+                             spline_implementation, spline_type, spline_parameters,
+                             penalty_order, penalty_type, penalty_parameters, penalty_std,
+                             cutoff, 
+                             exclude=None,
+                             surveillance_name=None,
+                             urbanisation_name='urbanisation_pop_weighted_std'):
+
+    m = build_model_name_mult_stat(alpha_type, alpha_parameters,
+                        intercept_type, intercept_parameters,
+                        link, link_stat_name, link_type,
+                        b1_type, b1_parameters,
+                        c_type, c_parameters,
+                        stat_names, num_knots, knot_type, degree,
+                        spline_implementation, spline_type, spline_parameters,
+                        penalty_order, penalty_type, penalty_parameters, penalty_std,
+                        cutoff, beta_u_type, beta_u_parameters,
+                        exclude=exclude)
+    
+    # ----
+    log_prob_terms = []   # list of callables, (upars) -> (chain, draw)
+    mu_spline_terms_i = []    # list of callables, (upars, i) -> (chain, draw)
+    mu_spline_terms_all = []    # list of callables, (upars) -> (chain, draw, n_data)
+    uparam_names = []     # track parameter names in order
+    uparam_idx = {}
+    # ----
+
+    model = pm.Model()
+    with model:
+        # Priors
+        if alpha_type == 'exponential':
+            alpha = pm.Exponential("alpha", lam=alpha_parameters['lam'])
+            # ----
+            uparam_names.append('alpha')
+            uparam_idx['alpha'] = alpha_idx = len(uparam_names) - 1
+            lam = alpha_parameters['lam']
+            def _log_prior_alpha(upars_np, lam=lam, idx=alpha_idx):
+                log_alpha = upars_np[:, :, idx]
+                alpha_val = np.exp(log_alpha)
+                return log_alpha + scipy.stats.expon.logpdf(alpha_val, scale=1/lam)
+            log_prob_terms.append(_log_prior_alpha)
+            # ----
+        elif alpha_type == 'gamma':
+            alpha = pm.Gamma("alpha", alpha=alpha_parameters['a'], beta=alpha_parameters['b'])
+            # ----
+            raise NotImplementedError('alpha gamma moment matching not implemented')
+            # ----
+
+        if intercept_type == 'normal':
+            intercept = pm.Normal("intercept", mu=intercept_parameters['mu'], sigma=intercept_parameters['sigma'])
+            # ----
+            uparam_names.append('intercept')
+            uparam_idx['intercept'] = intercept_idx = len(uparam_names) - 1
+            mu_i = intercept_parameters['mu']
+            sigma_i = intercept_parameters['sigma']
+            def _log_prior_intercept(upars_np, mu=mu_i, sigma=sigma_i, idx=intercept_idx):
+                v = upars_np[:, :, idx]
+                return scipy.stats.norm.logpdf(v, loc=mu, scale=sigma)
+            log_prob_terms.append(_log_prior_intercept)
+            # ----
+        if urbanisation_name is not None:
+            beta_u = pm.Normal("beta_u", mu=beta_u_parameters['mu'], sigma=beta_u_parameters['sigma'])
+            # ----
+            uparam_names.append('beta_u')
+            uparam_idx['beta_u'] = beta_u_idx = len(uparam_names) - 1
+            mu_u = beta_u_parameters['mu']
+            sigma_u = beta_u_parameters['sigma']
+            def _log_prior_beta_u(upars_np, mu=mu_u, sigma=sigma_u, idx=beta_u_idx):
+                v = upars_np[:, :, idx]
+                return scipy.stats.norm.logpdf(v, loc=mu, scale=sigma)
+            log_prob_terms.append(_log_prior_beta_u)
+            # ----
+
+        # splines
+        B = None
+        knot_list = None
+        V_r_dict = None
+        if stat_names is not None:
+            knot_list = {}
+            V_r_dict = {}
+            B = {}
+            sigma_w = {}
+            w = {}
+            f = {}
+            for stat_name in stat_names:
+                d = data[stat_name].values
+                # d = np.clip(d, np.percentile(d, 0.1), np.percentile(d, 99.9))
+
+                B_full, _, _, knot_list[stat_name] = eval_spline_basis_equispaced_numeric(degree, np.min(d), np.max(d), num_knots[stat_name], d).values()
+
+                if spline_implementation == 'svd':
+                    B_full_centred = B_full - B_full.mean(axis=0)  # centre the spline basis functions
+                    U, S, Vt = np.linalg.svd(B_full_centred, full_matrices=False)
+                    k = len(S)
+                    r = np.sum(S > 1e-10)
+                    U_r = U[:, :r]
+                    S_r = S[:r]
+                    Vt_r = Vt[:r, :]
+                    V_r = np.ascontiguousarray(Vt_r.T)
+                    V_r_dict[stat_name] = V_r
+                    X_r = U_r @ np.diag(S_r)
+                    X_r = np.ascontiguousarray(X_r)  # ensure X_r is C-contiguous for PyMC
+                    B[stat_name] = X_r
+
+                    # Spline coefficients
+                    if spline_type == 'halfnormal':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfNormal(f"sigma_w({stat_name})", sigma=spline_parameters['sigma_w_sigma'])
+                    elif spline_type == 'halfstudentt':
+                        sigma_w[stat_name] = pm.Deterministic(f"sigma_w({stat_name})", pt.as_tensor_variable(10.0))
+                        #sigma_w[stat_name] = pm.HalfStudentT(f"sigma_w({stat_name})", nu=spline_parameters['sigma_w_nu'], sigma=spline_parameters['sigma_w_sigma'])
+                    w[stat_name] = pm.Normal(f"w({stat_name})", mu=0, sigma=sigma_w[stat_name], size=B[stat_name].shape[1], dims=f"splines_{stat_name}")
+
+                    f[stat_name] = pm.math.dot(B[stat_name], w[stat_name])
+
+                    if penalty_order is not None:
+                        if penalty_type == 'halfnormal':
+                            h = (np.max(d) - np.min(d)) / (num_knots[stat_name] + 1)
+                            p = pm.Deterministic(f'p({stat_name})', pt.as_tensor_variable(penalty_parameters['p'][stat_name]))
+                        
+                        if penalty_std:
+                            raise ValueError("penalty_std=True is not allowed")
+                        else:
+                            D2 = difference_matrix(k, order=2)        # (k-2, k)
+                            D2V = np.ascontiguousarray(D2 @ V_r)        # (k-2, k)(k, r) = (k-2, r)
+                            D2V_pt = pt.as_tensor_variable(D2V)
+                            D2Vw = pt.dot(D2V_pt, w[stat_name])
+                            int_f_dd_sq = (1 / (3 * h**3)) * (
+                                            D2Vw[0]**2
+                                            + 2 * pt.sum(D2Vw[1:-1]**2)
+                                            + D2Vw[-1]**2
+                                            + pt.sum(D2Vw[:-1] * D2Vw[1:])
+                                        )
+                            pm.Potential(f"spline_penalty({stat_name})", (-pt.log(p) -1/2*int_f_dd_sq/p**2) * r)
+                            pen = pm.Deterministic(f"pen({stat_name})", (-pt.log(p) -1/2*int_f_dd_sq/p**2))
+                    
+                uparam_names.extend([f'w({stat_name})[{j}]' for j in range(r)])
+                w_slice = slice(len(uparam_names) - r, len(uparam_names))
+                # ----
+                # capture loop variable
+                _sn = stat_name
+                _r = r
+                _B = X_r.copy()
+                _V_r = V_r.copy()
+                _D2V = D2V.copy()
+                _p_val = penalty_parameters['p'][stat_name]
+                _h = h
+                _sigma_w = 10.0  # since it's Deterministic
+
+                def _log_prior_spline(upars_np, sn=_sn, r=_r, sigma_w=_sigma_w,
+                                    D2V=_D2V, p=_p_val, h=_h, w_slice=w_slice):
+                    w_keys = [f'w({sn})[{j}]' for j in range(r)]
+                    w_vals = upars_np[:, :, w_slice]
+                    # Normal prior on w
+                    log_p = scipy.stats.norm.logpdf(w_vals, loc=0, scale=sigma_w).sum(axis=-1)
+                    # Penalty potential
+                    D2Vw = w_vals @ D2V.T   # (..., k-2)
+                    int_f_dd_sq = (1 / (3 * h**3)) * (
+                        D2Vw[..., 0]**2
+                        + 2 * np.sum(D2Vw[..., 1:-1]**2, axis=-1)
+                        + D2Vw[..., -1]**2
+                        + np.sum(D2Vw[..., :-1] * D2Vw[..., 1:], axis=-1)
+                    )
+                    log_penalty = (-np.log(p) - 0.5 * int_f_dd_sq / p**2) * r
+                    return log_p + log_penalty
+                log_prob_terms.append(_log_prior_spline)
+
+                def _mu_spline_term_i(upars_np, i, sn=_sn, r=_r, B=_B, w_slice=w_slice):
+                    w_keys = [f'w({sn})[{j}]' for j in range(r)]
+                    w_vals = upars_np[:, :, w_slice]
+                    return w_vals @ B[i]   # (chain, draw) contribution to log_mu
+                mu_spline_terms_i.append(_mu_spline_term_i)
+
+                def _mu_spline_term_all(upars_np, sn=_sn, r=_r, B=_B, w_slice=w_slice):
+                    w_keys = [f'w({sn})[{j}]' for j in range(r)]
+                    w_vals = upars_np[:, :, w_slice]
+                    # w_vals = np.stack([upars.sel(uparam=k).values for k in w_keys], axis=-1)
+                    #w_vals = upars.sel(uparam=w_keys).values
+                    return w_vals @ B.T   # (chain, draw, r) @ (r, n_obs) -> (chain, draw, n_obs)
+                mu_spline_terms_all.append(_mu_spline_term_all)
+                # ----
+
+
+        # Link
+        log_mu = intercept + pm.math.log(data['population'])
+        surveillance_name = None
+        if surveillance_name is not None:
+            log_mu += pm.math.log(pm.math.max(data[surveillance_name], pm.math.log(1e-3)))
+        if urbanisation_name is not None:
+            log_mu += beta_u*data[urbanisation_name]
+        if stat_names is not None:
+            for stat_name in stat_names:
+                log_mu += f[stat_name]
+
+        # Zero-inflation component
+        if link is None:
+            y_obs = pm.NegativeBinomial('y_obs', mu=pm.math.exp(log_mu), alpha=alpha, observed=data['cases'])
+        else:
+            raise ValueError("link is not allowed for this model")
+
+    m = m[:200]
+    
+    y = data['cases'].values
+    log_factorial_y = scipy.special.gammaln(y + 1).astype(np.float64)
+    pop = data['population'].values
+    urban = data[urbanisation_name].values if urbanisation_name else None
+
+    def log_prob_upars_fn(upars):
+        t0 = time.perf_counter()
+        upars_np = upars.values  # (chain, draw, uparam)
+        t1 = time.perf_counter()
+
+        prior_total = sum(fn(upars_np) for fn in log_prob_terms)
+        t2 = time.perf_counter()
+
+        intercept_val = upars_np[:, :, uparam_idx['intercept']]
+        log_alpha = upars_np[:, :, uparam_idx['alpha']]
+        alpha_val = np.exp(log_alpha)
+        beta_u_val = upars_np[:, :, uparam_idx['beta_u']] if urbanisation_name else 0.0
+
+        log_mu = intercept_val[:, :, np.newaxis] + np.log(pop)
+        if urban is not None:
+            log_mu += beta_u_val[:, :, np.newaxis] * urban
+        for fn in mu_spline_terms_all:
+            log_mu += fn(upars_np)
+        t3 = time.perf_counter()
+
+        log_lik = nb_logpmf_chunked(y, log_mu=log_mu, alpha_val=alpha_val, log_factorial_y=log_factorial_y)
+        t4 = time.perf_counter()
+
+        total = prior_total + log_lik#.sum(axis=-1)  # sum over data points to get total log likelihood
+        t5 = time.perf_counter()
+
+        #print(f"upars.values:   {t1-t0:.3f}s")
+        #print(f"priors:         {t2-t1:.3f}s")
+        #print(f"log_mu build:   {t3-t2:.3f}s")
+        #print(f"nb_logpmf:      {t4-t3:.3f}s")
+        print(f"sum+total:      {t5-t0:.3f}s")
+        return xr.DataArray(total, dims=['chain', 'draw'])
+
+    def log_lik_i_upars_fn(upars, i):
+        upars_np = upars.values  # (chain, draw, uparam)
+
+        intercept_val = upars_np[:, :, uparam_idx['intercept']]
+        log_alpha = upars_np[:, :, uparam_idx['alpha']]
+        alpha_val = np.exp(log_alpha)
+        beta_u_val = upars_np[:, :, uparam_idx['beta_u']] if urbanisation_name else 0.0
+
+        log_mu_i = intercept_val + np.log(pop[i])
+        if urban is not None:
+            log_mu_i += beta_u_val * urban[i]
+        for fn in mu_spline_terms_i:
+            log_mu_i += fn(upars_np, i)
+
+        log_lik = nb_logpmf(y[i], log_mu=log_mu_i, alpha=alpha_val)
+        return xr.DataArray(log_lik, dims=['chain', 'draw'])
+    
+    return model, m, B, V_r_dict, knot_list, log_prob_upars_fn, log_lik_i_upars_fn, uparam_names

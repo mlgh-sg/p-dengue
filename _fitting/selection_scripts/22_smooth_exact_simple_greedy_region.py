@@ -72,11 +72,11 @@ regions = [#'ACEH',
 
 ]
 
-data_settings = {'admin':2, 'max_lag':6, 'start_year':2016, 'start_month':1, 'end_year':2018, 'end_month':12,
-                 'select_admin1_regions':regions}
+data_settings = {'admin':2, 'max_lag':6, 'start_year':2016, 'start_month':1, 'end_year':2019, 'end_month':12,
+                 'select_admin1_regions':None}
 data_name = data_settings_to_name(data_settings)
 
-fitting_task = '22_smooth_exact_simple_greedy_0_region'
+fitting_task = '22_smooth_exact_simple_greedy_1_region_mm_full_test'
 
 ################################################################################
 
@@ -117,10 +117,13 @@ def worker(task):
             check_idata=True,
             clear_idata=False,
             basis_scale=1,
-            model_builder='build_model_exact_mult_stat',
+            model_builder='build_model_exact_mult_stat_mm',
             show = {'summary': True, 'trace': True, 'pair': False, 'metrics': True,
                     'spline': True, 'exp_spline': True, 'link': True, 'link_spline': True,
-                    'divergences': True}
+                    'divergences': True},
+            moment_match = True,
+            exact_loo=True,
+            remove_temp_files=False
         )
         _first_task = False
         return (model_name, "success")
@@ -134,12 +137,13 @@ def worker(task):
 _data = read_in(folder, **data_settings, standardise=True, dropna=True, celsius=True, tp_log=True)
 statistics = _data.columns.tolist()
 # that start with t2m, rh, tp
-statistics = [name for name in statistics if name.startswith(('t2m','rh','tp'))]
+# statistics = [name for name in statistics if name.startswith(('t2m','rh','tp'))]
+statistics = [name for name in statistics if name.startswith(('t2m_max'))]
 # that contains 'pop_weighted'
 statistics = [name for name in statistics if 'pop_weighted' in name]
 # if it contains 'tp' then it should contain 'log('
 statistics = [name for name in statistics if not (name.startswith('tp') and 'log(' not in name)]
-lags = [0, 1, 2, 3, 4, 5, 6]
+lags = [0, 1]
 statistics = [stat for stat in statistics if any(f"({lag})" in stat for lag in lags)]
 
 print(len(statistics))
@@ -195,16 +199,16 @@ selected_complete_simple = { # adjusted for pareto k and sampling
     'tp_24hmean_pop_weighted_log(6)': [(2.5, 5)],
 }
 
-#selected_complete_simple = {s:[(2.5, 5)] for s in statistics}
+selected_complete_simple = {s:[(2.5, 5)] for s in statistics}
 p = {s: vals[0][0] for s, vals in selected_complete_simple.items()}
 num_knots = {s: vals[0][1] for s, vals in selected_complete_simple.items()}
 
 # greedy_0
-s1_list = None
+# s1_list = None
 
 # greedy_1
-# s1_list = []
-# s1_list.append([])
+s1_list = []
+s1_list.append([])
 
 # greedy_2
 # s1_list.append(['tp_24hmean_pop_weighted_log(1)']) #1
@@ -317,7 +321,7 @@ if __name__ == "__main__":
     
     # Number of workers (adjust based on your server)
     # Each model uses n_chains, so N_WORKERS * n_chains = total cores used
-    N_WORKERS = 1
+    N_WORKERS = 2
     
     with Pool(N_WORKERS, initializer=init_worker) as p:
         results = p.map(worker, tasks)
@@ -337,9 +341,9 @@ if __name__ == "__main__":
     #comparison_df = compare_models(outpath, data_name, task=fitting_task, metric=metric)
     model_fits_dir = outpath
     run_folders = [data_name + f'[{fitting_task}]']
-    models = tasks[0][0] if len(tasks) > 0 else []
+    #models = tasks[0][0] if len(tasks) > 0 else []
 
-    comparison_df = loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, pointwise=False)
+    comparison_df = loo_compare_models(model_fits_dir, run_folders, models=[], diff_quantile=0.95, pointwise=False)
     
     # Save comparison results
     save_path = os.path.join(outpath, f'{data_name}[{fitting_task}]', f"model_comparison({metric}).csv")

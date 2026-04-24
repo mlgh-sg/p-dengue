@@ -748,6 +748,7 @@ def loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, 
         if not os.path.isdir(metrics_dir):
             continue
         for fname in os.listdir(metrics_dir):
+            print(fname)
             if not fname.endswith('.npz'):
                 continue
             fmodel = fname[9:-5]
@@ -756,19 +757,27 @@ def loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, 
             metrics = np.load(os.path.join(metrics_dir, fname))
             loo_pw = metrics['loo_pointwise']
             pareto_k = metrics['pareto_k']
+            safe_loo_pw = loo_pw[pareto_k <= 0.7]
+
+            extra_fit = ('influence_pareto_k' in metrics)
+
             n = len(loo_pw)
             rows[fname[:-4]] = {
                 'model': fmodel,
                 "loo mean": float(np.mean(loo_pw)),
                 "loo sum": float(np.sum(loo_pw)),
                 "loo std": float(np.std(loo_pw)),
-                "loo_cv" : np.std(loo_pw) / np.abs(np.mean(loo_pw)),
+                # "loo cv" : float(np.std(loo_pw) / np.abs(np.mean(loo_pw))),
                 "loo mean se": float(np.std(loo_pw)/np.sqrt(len(loo_pw))),
                 
-                'safe loo mean': np.mean(loo_pw[pareto_k <= 0.7]),
-                'safe loo sum': np.sum(loo_pw[pareto_k <= 0.7]),
+                'safe loo mean': float(np.mean(safe_loo_pw)),
+                'safe loo sum': float(np.sum(safe_loo_pw)),
+                'safe loo std': float(np.std(safe_loo_pw)),
+                # 'safe loo cv': float(np.std(safe_loo_pw) / np.abs(np.mean(safe_loo_pw))),
+                'safe loo mean se': float(np.std(safe_loo_pw) / np.sqrt(len(safe_loo_pw))),
 
                 "n_pareto_k_bad": int(np.sum(pareto_k>0.7)),
+                "extra_fit": int(extra_fit),
                 "n_pareto_k_very_bad": int(np.sum(pareto_k>1)),
                 "pareto_k_mean": float(pareto_k.mean()),
                 
@@ -811,13 +820,13 @@ def loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, 
 
     df['loo diff mean'] = elpd_diff_mean
     df['loo diff std'] = elpd_diff_std
-    df['loo mean se'] = elpd_diff_dse
-    df['safe_loo diff mean'] = safe_elpd_diff_mean
-    df['safe_loo diff std'] = safe_elpd_diff_std
-    df['safe_loo diff mean se'] = safe_elpd_diff_dse
+    df['loo diff mean se'] = elpd_diff_dse
+    df['safe loo diff mean'] = safe_elpd_diff_mean
+    df['safe loo diff std'] = safe_elpd_diff_std
+    df['safe loo diff mean se'] = safe_elpd_diff_dse
 
     df['loo_diff_quantile'] = elpd_diff_quantile
-    df['safe_loo_diff_quantile'] = safe_elpd_diff_quantile
+    df['safe loo_diff_quantile'] = safe_elpd_diff_quantile
     
     # df = df.set_index('model')
     if not pointwise:
@@ -825,18 +834,27 @@ def loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, 
         df = df.drop(columns='pareto_k')
     return df[['rank', 'model',
                'n_pareto_k_bad',
-               'loo mean', 'loo sum',
+               'extra_fit',
+               'loo mean',
+               'loo sum',
+               'loo std',
+               # 'loo cv',
+               'loo mean se',
                'loo diff mean',
                'loo diff std', 
-               'loo mean se', 
+               'loo diff mean se', 
                'loo_diff_quantile',
                
                'n_pareto_k_bad',
-               'safe loo mean', 'safe loo sum',
-               'safe_loo diff mean',
-               'safe_loo diff std',
-               'safe_loo diff mean se',
-               'safe_loo_diff_quantile',
+               'safe loo mean',
+               'safe loo sum',
+               'safe loo std',
+               # 'safe loo cv',
+               'safe loo mean se',
+               'safe loo diff mean',
+               'safe loo diff std',
+               'safe loo diff mean se',
+               'safe loo_diff_quantile',
 
                'n_pareto_k_very_bad', 'pareto_k_mean']].set_index('rank')
                                                                                      
