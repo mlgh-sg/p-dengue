@@ -1,5 +1,5 @@
 # Imports and CPU / GPU setup
-GPU = True
+GPU = False
 CPU = not GPU
 
 # if using conda env for jax GPU
@@ -1718,7 +1718,7 @@ def fit_sig_spline_p_model(data, data_name,
             with open(os.path.join(output_path, "times.txt"), "w") as f:
                 f.write(f"{times[0]}\n{times[1]}\n")
             # Save inference data
-            idata_thinned = idata.sel(draw=slice(None, None, None))
+            idata_thinned = idata.sel(draw=slice(None, None, 8))
             idata_thinned.to_netcdf(idata_file)
             print('saved idata to', idata_file)
             print(f'\nPosterior Sampling {s1 - s0:.2f} seconds')
@@ -1764,6 +1764,7 @@ def fit_sig_spline_p_model(data, data_name,
             eval_psis_loo_elpd = m_temp["loo"]
             eval_waic = m_temp["waic"]
             good_k = eval_psis_loo_elpd.good_k
+            # print(vars(eval_psis_loo_elpd))
         else:
             #### WAIC and PSIS LOO
             with warnings.catch_warnings():
@@ -1841,8 +1842,8 @@ def fit_sig_spline_p_model(data, data_name,
                         elif CPU:
                             nuts_sampler_kwargs = {"max_energy_error": max_energy_error}
                         idata_loo = pm.sample(
-                            tune=100,#n_tune,
-                            draws=100,#n_draws,
+                            tune=n_tune,
+                            draws=n_draws,
                             chains=n_chains,
                             cores=n_chains,
                             discard_tuned_samples=True,
@@ -1877,10 +1878,11 @@ def fit_sig_spline_p_model(data, data_name,
             if os.path.exists(pointwise_file_temp_mm):
                 os.remove(pointwise_file_temp_mm)
         # ----
-        if hasattr(eval_psis_loo_elpd, 'influence_pareto_k'):
-            print('found extra')
+        if eval_psis_loo_elpd.influence_pareto_k is not None:
+            print('extra fit')
         else:
-            print('missing')
+            print('no extra fit')
+
         np.savez(
             pointwise_file,
             loo_elpd_loo = eval_psis_loo_elpd.elpd_loo if hasattr(eval_psis_loo_elpd, 'elpd_loo') else eval_psis_loo_elpd.elpd,
@@ -2774,7 +2776,7 @@ def build_model_exact_mult_stat_mm(data,
         #print(f"priors:         {t2-t1:.3f}s")
         #print(f"log_mu build:   {t3-t2:.3f}s")
         #print(f"nb_logpmf:      {t4-t3:.3f}s")
-        print(f"sum+total:      {t5-t0:.3f}s")
+        print(f"moment matching step:      {t5-t0:.3f}s")
         return xr.DataArray(total, dims=['chain', 'draw'])
 
     def log_lik_i_upars_fn(upars, i):

@@ -748,13 +748,14 @@ def loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, 
         if not os.path.isdir(metrics_dir):
             continue
         for fname in os.listdir(metrics_dir):
-            print(fname)
+            #print(fname)
             if not fname.endswith('.npz'):
                 continue
             fmodel = fname[9:-5]
             if len(models) > 0 and fmodel not in models:
                 continue
             metrics = np.load(os.path.join(metrics_dir, fname))
+            #print(metrics.files)
             loo_pw = metrics['loo_pointwise']
             pareto_k = metrics['pareto_k']
             safe_loo_pw = loo_pw[pareto_k <= 0.7]
@@ -764,6 +765,7 @@ def loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, 
             n = len(loo_pw)
             rows[fname[:-4]] = {
                 'model': fmodel,
+                'n vars': fname.count('p='),
                 "loo mean": float(np.mean(loo_pw)),
                 "loo sum": float(np.sum(loo_pw)),
                 "loo std": float(np.std(loo_pw)),
@@ -832,7 +834,7 @@ def loo_compare_models(model_fits_dir, run_folders, models, diff_quantile=0.95, 
     if not pointwise:
         df = df.drop(columns='pointwise')
         df = df.drop(columns='pareto_k')
-    return df[['rank', 'model',
+    return df[['rank', 'model', 'n vars',
                'n_pareto_k_bad',
                'extra_fit',
                'loo mean',

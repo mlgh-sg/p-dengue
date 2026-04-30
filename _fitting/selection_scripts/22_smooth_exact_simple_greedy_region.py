@@ -73,10 +73,10 @@ regions = [#'ACEH',
 ]
 
 data_settings = {'admin':2, 'max_lag':6, 'start_year':2016, 'start_month':1, 'end_year':2019, 'end_month':12,
-                 'select_admin1_regions':None}
+                 'select_admin1_regions':regions}
 data_name = data_settings_to_name(data_settings)
 
-fitting_task = '22_smooth_exact_simple_greedy_1_region_mm_full_test'
+fitting_task = '22_smooth_exact_simple_regions_mm_greedy_3'
 
 ################################################################################
 
@@ -119,7 +119,7 @@ def worker(task):
             basis_scale=1,
             model_builder='build_model_exact_mult_stat_mm',
             show = {'summary': True, 'trace': True, 'pair': False, 'metrics': True,
-                    'spline': True, 'exp_spline': True, 'link': True, 'link_spline': True,
+                    'spline': True, 'exp_spline': True, 'link': False, 'link_spline': False,
                     'divergences': True},
             moment_match = True,
             exact_loo=True,
@@ -137,13 +137,12 @@ def worker(task):
 _data = read_in(folder, **data_settings, standardise=True, dropna=True, celsius=True, tp_log=True)
 statistics = _data.columns.tolist()
 # that start with t2m, rh, tp
-# statistics = [name for name in statistics if name.startswith(('t2m','rh','tp'))]
-statistics = [name for name in statistics if name.startswith(('t2m_max'))]
+statistics = [name for name in statistics if name.startswith(('t2m','rh','tp'))]
 # that contains 'pop_weighted'
 statistics = [name for name in statistics if 'pop_weighted' in name]
 # if it contains 'tp' then it should contain 'log('
 statistics = [name for name in statistics if not (name.startswith('tp') and 'log(' not in name)]
-lags = [0, 1]
+lags = [0, 1, 2, 3, 4, 5, 6]
 statistics = [stat for stat in statistics if any(f"({lag})" in stat for lag in lags)]
 
 print(len(statistics))
@@ -199,7 +198,7 @@ selected_complete_simple = { # adjusted for pareto k and sampling
     'tp_24hmean_pop_weighted_log(6)': [(2.5, 5)],
 }
 
-selected_complete_simple = {s:[(2.5, 5)] for s in statistics}
+#selected_complete_simple = {s:[(2.5, 5)] for s in statistics}
 p = {s: vals[0][0] for s, vals in selected_complete_simple.items()}
 num_knots = {s: vals[0][1] for s, vals in selected_complete_simple.items()}
 
@@ -208,17 +207,18 @@ num_knots = {s: vals[0][1] for s, vals in selected_complete_simple.items()}
 
 # greedy_1
 s1_list = []
-s1_list.append([])
+# s1_list.append([])
 
 # greedy_2
-# s1_list.append(['tp_24hmean_pop_weighted_log(1)']) #1
-# s1_list.append(['rh_mean_pop_weighted(1)']) #2
-# s1_list.append(['rh_mean_pop_weighted(0)']) #3
+#s1_list.append(['rh_mean_pop_weighted(1)'])
+#s1_list.append(['tp_24hmean_pop_weighted_log(2)'])
+#s1_list.append(['rh_mean_pop_weighted(0)'])
 
 # greedy_3
-# s1_list.append(['tp_24hmean_pop_weighted_log(1)', 't2m_max_pop_weighted(4)']) #1
-# s1_list.append(['tp_24hmean_pop_weighted_log(1)', 't2m_mean_pop_weighted(4)']) #2
-# s1_list.append(['rh_mean_pop_weighted(1)', 'tp_24hmean_pop_weighted_log(5)']) #3
+s1_list.append(['rh_mean_pop_weighted(1)', 'tp_24hmax_pop_weighted_log(6)'])
+s1_list.append(['rh_mean_pop_weighted(1)', 'tp_24hmean_pop_weighted_log(6)'])
+s1_list.append(['tp_24hmean_pop_weighted_log(2)', 'tp_24hmax_pop_weighted_log(6)'])
+s1_list.append(['rh_mean_pop_weighted(1)', 't2m_mean_pop_weighted(3)'])
 
 # greedy_4
 # s1_list.append(['rh_mean_pop_weighted(1)', 'tp_24hmean_pop_weighted_log(5)', 't2m_max_pop_weighted(6)']) #1
@@ -278,7 +278,7 @@ if __name__ == "__main__":
                 model_dict[model_name] = settings
     else:
         print("Fitting NB log_population + intercept + urbanisation model")
-        stat_names=None
+        stat_names = None
         settings = {
             'alpha_type': 'exponential', 'alpha_parameters': {'lam': 0.5},
             'intercept_type': 'normal', 'intercept_parameters': {'mu': -10.0, 'sigma': 1.0},
@@ -313,7 +313,7 @@ if __name__ == "__main__":
     random.seed(42)  # for reproducibility
     random.shuffle(tasks)
     random.shuffle(tasks)
-    tasks = tasks[::]
+    tasks = tasks[:54]
     #random.shuffle(tasks)
     
     print(f"Fitting {len(tasks)} models in total...")
@@ -321,7 +321,7 @@ if __name__ == "__main__":
     
     # Number of workers (adjust based on your server)
     # Each model uses n_chains, so N_WORKERS * n_chains = total cores used
-    N_WORKERS = 2
+    N_WORKERS = 3
     
     with Pool(N_WORKERS, initializer=init_worker) as p:
         results = p.map(worker, tasks)
@@ -341,13 +341,20 @@ if __name__ == "__main__":
     #comparison_df = compare_models(outpath, data_name, task=fitting_task, metric=metric)
     model_fits_dir = outpath
     run_folders = [data_name + f'[{fitting_task}]']
+    all_run_folders = ['a2_201601_201912[22_smooth_exact_simple_regions_mm_greedy_0]',
+                   'a2_201601_201912[22_smooth_exact_simple_regions_mm_greedy_1]',
+                   'a2_201601_201912[22_smooth_exact_simple_regions_mm_greedy_2]',
+                   'a2_201601_201912[22_smooth_exact_simple_regions_mm_greedy_3]']
     #models = tasks[0][0] if len(tasks) > 0 else []
 
     comparison_df = loo_compare_models(model_fits_dir, run_folders, models=[], diff_quantile=0.95, pointwise=False)
+    all_comparison_df = loo_compare_models(model_fits_dir, all_run_folders, models=[], diff_quantile=0.95, pointwise=False)
     
     # Save comparison results
     save_path = os.path.join(outpath, f'{data_name}[{fitting_task}]', f"model_comparison({metric}).csv")
+    all_save_path = os.path.join(outpath, f'{data_name}[{fitting_task}]', f"model_comparison({metric})_0123.csv")
     comparison_df.to_csv(save_path)
+    all_comparison_df.to_csv(all_save_path)
     print(f"\nComparison saved to: {save_path}")
 
     elpd_metrics = pd.read_csv(os.path.join(outpath, f'{data_name}[{fitting_task}]', f"_model_elpd_metrics.csv"))

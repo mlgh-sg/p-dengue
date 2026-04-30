@@ -36,7 +36,7 @@ def path_setup(outpath, data_name, task, model_name):
 def elpd_to_row(eval_waic, eval_loo, model_name, data_name):
 
     extra_fit = False
-    if hasattr(eval_loo, 'influence_pareto_k'):
+    if eval_loo.influence_pareto_k is not None:
         extra_fit = True
 
     loo_pointwise = eval_loo.loo_i.values if hasattr(eval_loo, 'loo_i') else eval_loo.elpd_i.values
